@@ -1,66 +1,11 @@
 import type { KnowledgeBaseConfig, McpBinding, WorkspaceId } from "@diy-agent/domain";
+import { InternalKbStore } from "./internal-kb-store.js";
+import type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
 
-export interface KbDocument {
-  id: string;
-  workspaceId: WorkspaceId;
-  title: string;
-  content: string;
-  embedding?: number[];
-  createdAt: Date;
-}
-
-export interface KbSearchHit {
-  documentId: string;
-  title: string;
-  snippet: string;
-  score: number;
-  source: "internal" | "external_mcp";
-}
-
-export interface KbSearchResult {
-  query: string;
-  hits: KbSearchHit[];
-}
-
-const internalIndex = new Map<string, KbDocument[]>();
-
-export class InternalKbStore {
-  async ingest(doc: Omit<KbDocument, "id" | "createdAt">): Promise<KbDocument> {
-    const entry: KbDocument = {
-      ...doc,
-      id: crypto.randomUUID(),
-      createdAt: new Date(),
-    };
-    const list = internalIndex.get(doc.workspaceId) ?? [];
-    list.push(entry);
-    internalIndex.set(doc.workspaceId, list);
-    return entry;
-  }
-
-  async search(workspaceId: WorkspaceId, query: string, limit = 5): Promise<KbSearchHit[]> {
-    const docs = internalIndex.get(workspaceId) ?? [];
-    const q = query.toLowerCase();
-    return docs
-      .map((d) => ({
-        documentId: d.id,
-        title: d.title,
-        snippet: d.content.slice(0, 200),
-        score: scoreMatch(d, q),
-        source: "internal" as const,
-      }))
-      .filter((h) => h.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
-  }
-}
-
-function scoreMatch(doc: KbDocument, query: string): number {
-  const text = `${doc.title} ${doc.content}`.toLowerCase();
-  const terms = query.split(/\s+/).filter(Boolean);
-  if (terms.length === 0) return 0;
-  const hits = terms.filter((t) => text.includes(t)).length;
-  return hits / terms.length;
-}
+export type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
+export { embedText, cosineSimilarity, EMBEDDING_DIMENSIONS } from "./embedding.js";
+export { InternalKbStore, getInternalIndex, resetInternalIndexForTests } from "./internal-kb-store.js";
+export { PostgresKbStore } from "./postgres-kb-store.js";
 
 export class ExternalMcpKbConnector {
   constructor(private binding: McpBinding) {}
@@ -86,7 +31,7 @@ function reciprocalRankFusion(
   const scores = new Map<string, KbSearchHit & { rrf: number }>();
   for (let i = 0; i < lists.length; i++) {
     const weight = weights[i] ?? 1;
-    lists[i].forEach((hit, rank) => {
+    lists[i]!.forEach((hit, rank) => {
       const existing = scores.get(hit.documentId);
       const contribution = weight * (1 / (k + rank + 1));
       if (existing) {
@@ -102,9 +47,14 @@ function reciprocalRankFusion(
 }
 
 export class HybridKbService {
-  private internal = new InternalKbStore();
+  private internal: KbStore;
 
-  constructor(private config: KnowledgeBaseConfig) {}
+  constructor(
+    private config: KnowledgeBaseConfig,
+    internalStore?: KbStore,
+  ) {
+    this.internal = internalStore ?? new InternalKbStore();
+  }
 
   async ingest(
     workspaceId: WorkspaceId,
@@ -136,8 +86,4 @@ export class HybridKbService {
     const hits = reciprocalRankFusion(lists, [weights.internal, weights.external]);
     return { query, hits };
   }
-}
-
-export function getInternalIndex(): Map<string, KbDocument[]> {
-  return internalIndex;
 }

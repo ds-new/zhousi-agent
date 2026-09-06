@@ -1,6 +1,7 @@
 import {
   DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
   SESSION_TOKEN_TTL_MS,
+  isTraceExpired,
   resolveModelRoute,
   type AgentProfile,
   type AgentProfileVersion,
@@ -54,6 +55,14 @@ export class MemoryStore implements ControlPlaneStore {
 
   async getProfile(id: ProfileId): Promise<AgentProfile | null> {
     return this.profiles.get(id) ?? null;
+  }
+
+  async getTenantForProfile(profileId: ProfileId): Promise<Tenant | null> {
+    const profile = this.profiles.get(profileId);
+    if (!profile) return null;
+    const ws = this.workspaces.get(profile.workspaceId);
+    if (!ws) return null;
+    return this.tenants.get(ws.tenantId) ?? null;
   }
 
   async getProfileVersion(
@@ -253,6 +262,7 @@ export class MemoryStore implements ControlPlaneStore {
   }
 
   async saveTrace(trace: Omit<EvalTraceRecord, "id" | "createdAt">): Promise<EvalTraceRecord> {
+    this.purgeExpiredTraces();
     const entry: EvalTraceRecord = {
       ...trace,
       id: crypto.randomUUID(),
@@ -260,6 +270,14 @@ export class MemoryStore implements ControlPlaneStore {
     };
     this.traces.set(entry.id, entry);
     return entry;
+  }
+
+  protected purgeExpiredTraces(now = new Date()): void {
+    for (const [id, trace] of this.traces) {
+      if (isTraceExpired(trace.createdAt, now)) {
+        this.traces.delete(id);
+      }
+    }
   }
 
   async listTraces(profileId: ProfileId, limit = 50): Promise<EvalTraceRecord[]> {

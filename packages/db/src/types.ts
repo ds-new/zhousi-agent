@@ -88,6 +88,7 @@ export interface ControlPlaneStore {
     version: AgentProfileVersion;
   } | null>;
   getProfile(id: ProfileId): Promise<AgentProfile | null>;
+  getTenantForProfile(profileId: ProfileId): Promise<Tenant | null>;
   getProfileVersion(
     profileId: ProfileId,
     versionId: AgentProfileVersion["id"],

@@ -2,10 +2,11 @@
  * Control Plane HTTP server — testable factory + route handlers.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { HybridKbService } from "@diy-agent/kb-rag";
+import { HybridKbService, PostgresKbStore } from "@diy-agent/kb-rag";
 import { createOrchestrator } from "@diy-agent/orchestrator";
 import {
   MemoryStore,
+  PostgresStore,
   createStore,
   type ControlPlaneStore,
 } from "@diy-agent/db";
@@ -63,10 +64,15 @@ export function createControlPlaneServer(
   const evolve = options.evolutionInvoker ?? invokeEvolutionService;
   const kbServices = new Map<string, HybridKbService>();
 
-  function getKbService(profile: AgentProfile): HybridKbService {
+  async function resolveKbService(profile: AgentProfile): Promise<HybridKbService> {
     let svc = kbServices.get(profile.id);
     if (!svc) {
-      svc = new HybridKbService(profile.kbConfig ?? { internal: { enabled: true } });
+      const tenant = await store.getTenantForProfile(profile.id);
+      let internalStore;
+      if (tenant && store instanceof PostgresStore) {
+        internalStore = new PostgresKbStore(store.getPool(), tenant.dbSchema);
+      }
+      svc = new HybridKbService(profile.kbConfig ?? { internal: { enabled: true } }, internalStore);
       kbServices.set(profile.id, svc);
     }
     return svc;
@@ -241,6 +247,15 @@ export function createControlPlaneServer(
       return json(res, 200, { tasks });
     }
 
+    const tracesListMatch = path.match(/^\/profiles\/([^/]+)\/traces$/);
+    if (method === "GET" && tracesListMatch) {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const limitParam = url.searchParams.get("limit");
+      const limit = limitParam ? Number(limitParam) : 50;
+      const traces = await store.listTraces(tracesListMatch[1] as ProfileId, limit);
+      return json(res, 200, { traces });
+    }
+
     if (method === "POST" && path === "/traces") {
       const body = await readBody(req);
       if (!body.profileId || !body.profileVersionId || body.latencyMs === undefined) {
@@ -382,11 +397,17 @@ export function createControlPlaneServer(
         });
         if (!run) return json(res, 400, { error: "invalid_profile" });
         const profile = await store.getProfile(body.profileId as ProfileId);
+        const version = await store.getLatestProfileVersion(run.profileId);
+        const traces = await store.listTraces(run.profileId, 50);
+        const goldenTasks = await store.listGoldenTasks(run.profileId);
         const svc = await evolve({
           profileId: run.profileId,
           baseVersionId: run.baseVersionId,
           tier: run.tier,
           target: run.target,
+          snapshot: version?.snapshot,
+          evalTasks: goldenTasks,
+          traces,
         });
         run.status = svc.status;
         if (svc.candidateVersionId) {
@@ -428,11 +449,17 @@ export function createControlPlaneServer(
       }
       const run = result as import("@diy-agent/domain").EvolutionRun;
       try {
+        const version = await store.getLatestProfileVersion(run.profileId);
+        const traces = await store.listTraces(run.profileId, 50);
+        const goldenTasks = await store.listGoldenTasks(run.profileId);
         const svc = await evolve({
           profileId: run.profileId,
           baseVersionId: run.baseVersionId,
           tier: run.tier,
           target: run.target,
+          snapshot: version?.snapshot,
+          evalTasks: goldenTasks,
+          traces,
         });
         run.status = svc.status;
         return json(res, 201, { run, signal: true });
@@ -458,7 +485,7 @@ export function createControlPlaneServer(
       }
       const profile = await store.getProfile(body.profileId as ProfileId);
       if (!profile) return json(res, 404, { error: "profile_not_found" });
-      const doc = await getKbService(profile).ingest(
+      const doc = await (await resolveKbService(profile)).ingest(
         profile.workspaceId,
         body.title as string,
         body.content as string,
@@ -474,7 +501,10 @@ export function createControlPlaneServer(
       }
       const profile = await store.getProfile(body.profileId as ProfileId);
       if (!profile) return json(res, 404, { error: "profile_not_found" });
-      const result = await getKbService(profile).search(profile.workspaceId, body.query as string);
+      const result = await (await resolveKbService(profile)).search(
+        profile.workspaceId,
+        body.query as string,
+      );
       return json(res, 200, result);
     }
 

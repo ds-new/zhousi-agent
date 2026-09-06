@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   DEFAULT_PROFILE_PIN_GATE,
+  EVAL_TRACE_RETENTION_DAYS,
+  isTraceExpired,
   resolveMcpPoolScope,
   resolveModelRoute,
   shouldWarmPool,
@@ -37,5 +39,12 @@ describe("domain helpers", () => {
     assert.equal(DEFAULT_PROFILE_PIN_GATE.minPassRate, 0.85);
     assert.equal(DEFAULT_PROFILE_PIN_GATE.maxP95LatencyMs, 8000);
     assert.equal(DEFAULT_PROFILE_PIN_GATE.minToolSuccessRate, 0.9);
+  });
+
+  it("isTraceExpired enforces 90-day retention", () => {
+    assert.equal(EVAL_TRACE_RETENTION_DAYS, 90);
+    const now = new Date("2026-01-01T00:00:00Z");
+    assert.equal(isTraceExpired(new Date("2025-12-01T00:00:00Z"), now), false);
+    assert.equal(isTraceExpired(new Date("2025-09-01T00:00:00Z"), now), true);
   });
 });

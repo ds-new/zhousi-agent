@@ -39,3 +39,15 @@ CREATE TABLE IF NOT EXISTS :schema.eval_traces (
 );
 
 CREATE INDEX IF NOT EXISTS idx_eval_traces_created ON :schema.eval_traces (created_at);
+CREATE INDEX IF NOT EXISTS idx_eval_traces_profile ON :schema.eval_traces (profile_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS :schema.kb_documents (
+  id UUID PRIMARY KEY,
+  workspace_id UUID NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  embedding vector(128) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_documents_workspace ON :schema.kb_documents (workspace_id);

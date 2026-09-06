@@ -51,6 +51,12 @@ export const DEFAULT_EVOLUTION_SIGNAL_THRESHOLD = 0.75;
 export const DEFAULT_MAX_WARM_MCP_CONNECTIONS = 10;
 export const MIN_GOLDEN_TASKS_FOR_PIN = 5;
 export const SESSION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+export const EVAL_TRACE_RETENTION_DAYS = 90;
+
+export function isTraceExpired(createdAt: Date, now = new Date()): boolean {
+  const cutoffMs = EVAL_TRACE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  return createdAt.getTime() < now.getTime() - cutoffMs;
+}
 
 export interface Tenant {
   id: TenantId;

@@ -30,6 +30,15 @@ paths:
   /traces:
     post:
       summary: Ingest Eval Trace
+  /profiles/{profileId}/traces:
+    get:
+      summary: List Eval Traces (90-day retention)
+  /kb/documents:
+    post:
+      summary: Ingest document into Workspace internal KB (pgvector)
+  /kb/search:
+    post:
+      summary: Hybrid KB search (internal vector + external MCP)
   /evolution/runs:
     post:
       summary: Start Evolution Run
