@@ -13,5 +13,8 @@
     config:
       warmPoolDefault: true
       idleTimeoutMs: 300000
-  - id: diy-orchestrator
-    name: "@diy-agent/dsh-orchestrator-plugin"
+      maxConnectionsPerTenant: 10
+  - id: diy-policy
+    name: "@diy-agent/dsh-policy-plugin"
+  - id: diy-trace
+    name: "@diy-agent/dsh-trace-plugin"

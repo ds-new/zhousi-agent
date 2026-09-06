@@ -1,67 +1,48 @@
 #!/usr/bin/env python3
-"""Evolution HTTP sidecar — GEPA placeholder."""
-
+"""Minimal Evolution Service sidecar — GEPA placeholder with real HTTP contract."""
 from __future__ import annotations
 
 import json
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from diy_agent_evolution import (
-    EvolutionRequest,
-    GovernanceTier,
-    run_evolution,
-)
 
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt: str, *args: object) -> None:
-        return
-
-    def do_GET(self) -> None:
-        if self.path == "/health":
-            self._json(200, {"ok": True})
-        else:
-            self._json(404, {"error": "not_found"})
-
+class EvolutionHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path != "/run":
-            self._json(404, {"error": "not_found"})
+            self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
-        tier = GovernanceTier(body.get("tier", "L1"))
-        result = run_evolution(
-            EvolutionRequest(
-                profile_id=body["profileId"],
-                base_version_id=body["baseVersionId"],
-                tier=tier,
-                target=body.get("target", "skill"),
-            )
-        )
-        self._json(
-            200,
-            {
-                "runId": result.run_id,
-                "status": result.status.value,
-                "candidateVersionId": result.candidate_version_id,
-                "evalScoreDelta": result.eval_score_delta,
-                "requiresReview": result.requires_review,
-            },
-        )
-
-    def _json(self, code: int, payload: dict) -> None:
-        data = json.dumps(payload).encode()
-        self.send_response(code)
+        body = json.loads(self.read(length) if length else "{}")
+        tier = body.get("tier", "L1")
+        response = {
+            "runId": str(uuid.uuid4()),
+            "status": "awaiting_review" if tier == "L2" else "completed",
+            "candidateVersionId": f"candidate-{uuid.uuid4().hex[:8]}",
+            "evalScoreDelta": 0.03,
+            "requiresReview": tier == "L2",
+            "mutations": [
+                {
+                    "path": "skills/0",
+                    "before": "old",
+                    "after": "improved",
+                    "tier": tier,
+                }
+            ],
+        }
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(json.dumps(response).encode())
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
 
 
 def main() -> None:
     port = int(__import__("os").environ.get("DIY_EVOLUTION_PORT", "9880"))
-    server = HTTPServer(("127.0.0.1", port), Handler)
-    print(f"evolution sidecar listening on :{port}")
+    server = HTTPServer(("127.0.0.1", port), EvolutionHandler)
+    print(f"evolution service listening on http://127.0.0.1:{port}", flush=True)
     server.serve_forever()
 
 

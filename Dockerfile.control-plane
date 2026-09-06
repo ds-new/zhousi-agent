@@ -1,0 +1,10 @@
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY packages ./packages
+COPY services/control-plane ./services/control-plane
+COPY tsconfig.base.json ./
+RUN npm install && npm run build -w @diy-agent/control-plane
+WORKDIR /app/services/control-plane
+EXPOSE 9878
+CMD ["node", "dist/index.js"]

@@ -1,0 +1,5 @@
+FROM python:3.12-alpine
+WORKDIR /app
+COPY services/evolution/server.py ./server.py
+EXPOSE 9880
+CMD ["python3", "server.py"]

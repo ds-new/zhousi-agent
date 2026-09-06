@@ -7,28 +7,22 @@ export type ProfileId = string & { readonly __brand: "ProfileId" };
 export type ProfileVersionId = string & { readonly __brand: "ProfileVersionId" };
 
 export type GovernanceTier = "L0" | "L1" | "L2" | "L3";
-
 export type IsolationMode = "schema" | "dedicated";
-
 export type McpPoolScope = "tenant" | "workspace" | "session";
-
 export type SkillSource = "marketplace" | "private";
-
 export type OrchestrationTopology = "supervisor" | "pipeline" | "blackboard";
-
 export type EvolutionTrigger = "manual" | "signal" | "scheduled";
+export type PolicyEffect = "allow" | "deny" | "ask";
+export type McpApprovalStatus = "pending" | "approved" | "rejected";
 
 export interface KnowledgeBaseConfig {
-  internal?: {
-    enabled: boolean;
-    embeddingModel?: string;
-  };
+  internal?: { enabled: boolean; embeddingModel?: string };
   externalMcp?: McpBinding;
+  fusionWeights?: { internal: number; external: number };
 }
 
 export interface OrchestrationConfig {
   topology: OrchestrationTopology;
-  /** Worker profile IDs for supervisor / pipeline stages */
   workerProfileIds?: ProfileId[];
 }
 
@@ -37,6 +31,7 @@ export interface TenantGateway {
   rateLimitRpm?: number;
   fallbackProvider?: string;
   maxTokensPerDay?: number;
+  maxWarmMcpConnections?: number;
 }
 
 export interface ProfilePinGate {
@@ -47,14 +42,19 @@ export interface ProfilePinGate {
 }
 
 export const DEFAULT_PROFILE_PIN_GATE: ProfilePinGate = {
-  minPassRate: 0.8,
-  maxP95LatencyMs: 5000,
+  minPassRate: 0.85,
+  maxP95LatencyMs: 8000,
+  minToolSuccessRate: 0.9,
 };
+
+export const DEFAULT_EVOLUTION_SIGNAL_THRESHOLD = 0.75;
+export const DEFAULT_MAX_WARM_MCP_CONNECTIONS = 10;
+export const MIN_GOLDEN_TASKS_FOR_PIN = 5;
+export const SESSION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface Tenant {
   id: TenantId;
   name: string;
-  /** Each tenant owns an isolated DB schema or connection string */
   dbSchema: string;
   isolationMode: IsolationMode;
   gateway: TenantGateway;
@@ -71,9 +71,9 @@ export interface Workspace {
 export interface ModelRoute {
   provider: string;
   model: string;
-  /** Custom endpoint override, e.g. private vLLM */
   baseUrl?: string;
   apiKeyRef?: string;
+  fallback?: ModelRoute;
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
 }
 
@@ -84,9 +84,7 @@ export interface McpBinding {
   args?: string[];
   url?: string;
   envRef?: Record<string, string>;
-  /** Warm pool: keep process alive between turns */
   warmPool?: boolean;
-  /** Default workspace; session for sensitive; tenant for read-only KB */
   poolScope?: McpPoolScope;
   sensitivity?: "normal" | "high" | "readonly";
 }
@@ -118,7 +116,6 @@ export interface AgentProfileVersion {
   version: number;
   snapshot: Omit<AgentProfile, "pinnedVersionId">;
   createdAt: Date;
-  /** L2+ changes require approval before pin */
   approvalStatus?: "pending" | "approved" | "rejected";
 }
 
@@ -146,14 +143,12 @@ export interface MemoryEntry {
   updatedAt: Date;
 }
 
-/** L0 self-governance: TTL → dedup → compaction */
 export interface MemoryGovernancePolicy {
   workspaceId: WorkspaceId;
   maxEntries: number;
   defaultTtlDays?: number;
   dedupSimilarityThreshold: number;
   compactionTriggerCount: number;
-  /** Run compaction asynchronously after turn */
   asyncCompaction?: boolean;
 }
 
@@ -174,23 +169,6 @@ export interface EvalResult {
   passed: boolean;
 }
 
-export function resolveModelRoute(
-  gateway: TenantGateway,
-  profileRoute: ModelRoute
-): ModelRoute | null {
-  if (!gateway.allowedProviders.includes(profileRoute.provider)) {
-    return null;
-  }
-  return profileRoute;
-}
-
-export function resolveMcpPoolScope(binding: McpBinding): McpPoolScope {
-  if (binding.poolScope) return binding.poolScope;
-  if (binding.sensitivity === "high") return "session";
-  if (binding.sensitivity === "readonly") return "tenant";
-  return "workspace";
-}
-
 export interface EvolutionRun {
   id: string;
   profileId: ProfileId;
@@ -204,4 +182,89 @@ export interface EvolutionRun {
   createdAt: Date;
 }
 
-export const DEFAULT_EVOLUTION_SIGNAL_THRESHOLD = 0.75;
+export interface SkillCatalogEntry {
+  id: string;
+  tenantId: TenantId;
+  workspaceId?: WorkspaceId;
+  name: string;
+  contentHash: string;
+  source: SkillSource;
+  createdAt: Date;
+}
+
+export interface McpCatalogEntry {
+  serverName: string;
+  tenantId: TenantId;
+  transport: McpBinding["transport"];
+  command?: string;
+  args?: string[];
+  url?: string;
+  defaultSensitivity: McpBinding["sensitivity"];
+  approvalStatus: McpApprovalStatus;
+  createdAt: Date;
+}
+
+export interface CredentialRefRecord {
+  id: string;
+  tenantId: TenantId;
+  scope: string;
+  createdBy: string;
+  rotationAt?: Date;
+  createdAt: Date;
+}
+
+export interface AccessPolicyRule {
+  effect: PolicyEffect;
+  toolPattern: string;
+  sensitivity?: McpBinding["sensitivity"];
+}
+
+export interface AccessPolicy {
+  workspaceId: WorkspaceId;
+  rules: AccessPolicyRule[];
+}
+
+export interface AuditEvent {
+  id: string;
+  tenantId: TenantId;
+  workspaceId?: WorkspaceId;
+  action: string;
+  actor?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: Date;
+}
+
+export interface WebhookRegistration {
+  id: string;
+  tenantId: TenantId;
+  url: string;
+  events: string[];
+  createdAt: Date;
+}
+
+export function resolveModelRoute(
+  gateway: TenantGateway,
+  profileRoute: ModelRoute,
+): ModelRoute | null {
+  if (!gateway.allowedProviders.includes(profileRoute.provider)) {
+    return null;
+  }
+  if (profileRoute.fallback) {
+    if (!gateway.allowedProviders.includes(profileRoute.fallback.provider)) {
+      return null;
+    }
+  }
+  return profileRoute;
+}
+
+export function resolveMcpPoolScope(binding: McpBinding): McpPoolScope {
+  if (binding.poolScope) return binding.poolScope;
+  if (binding.sensitivity === "high") return "session";
+  if (binding.sensitivity === "readonly") return "tenant";
+  return "workspace";
+}
+
+export function shouldWarmPool(binding: McpBinding): boolean {
+  if (binding.sensitivity === "high") return false;
+  return binding.warmPool ?? true;
+}

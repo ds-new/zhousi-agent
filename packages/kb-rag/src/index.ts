@@ -1,7 +1,3 @@
-/**
- * Hybrid KB: internal pgvector (memory placeholder) + external MCP connector.
- */
-
 import type { KnowledgeBaseConfig, McpBinding, WorkspaceId } from "@diy-agent/domain";
 
 export interface KbDocument {
@@ -26,7 +22,6 @@ export interface KbSearchResult {
   hits: KbSearchHit[];
 }
 
-/** In-memory vector store — production: pgvector in tenant schema */
 const internalIndex = new Map<string, KbDocument[]>();
 
 export class InternalKbStore {
@@ -70,7 +65,6 @@ function scoreMatch(doc: KbDocument, query: string): number {
 export class ExternalMcpKbConnector {
   constructor(private binding: McpBinding) {}
 
-  /** Placeholder — production: call mcp__{server}__search via DSH tools */
   async search(_query: string): Promise<KbSearchHit[]> {
     return [
       {
@@ -84,6 +78,29 @@ export class ExternalMcpKbConnector {
   }
 }
 
+function reciprocalRankFusion(
+  lists: KbSearchHit[][],
+  weights: number[],
+  k = 60,
+): KbSearchHit[] {
+  const scores = new Map<string, KbSearchHit & { rrf: number }>();
+  for (let i = 0; i < lists.length; i++) {
+    const weight = weights[i] ?? 1;
+    lists[i].forEach((hit, rank) => {
+      const existing = scores.get(hit.documentId);
+      const contribution = weight * (1 / (k + rank + 1));
+      if (existing) {
+        existing.rrf += contribution;
+      } else {
+        scores.set(hit.documentId, { ...hit, rrf: contribution });
+      }
+    });
+  }
+  return [...scores.values()]
+    .sort((a, b) => b.rrf - a.rrf)
+    .map(({ rrf, ...hit }) => ({ ...hit, score: rrf }));
+}
+
 export class HybridKbService {
   private internal = new InternalKbStore();
 
@@ -92,25 +109,31 @@ export class HybridKbService {
   async ingest(
     workspaceId: WorkspaceId,
     title: string,
-    content: string
+    content: string,
   ): Promise<KbDocument | null> {
     if (!this.config.internal?.enabled) return null;
     return this.internal.ingest({ workspaceId, title, content });
   }
 
   async search(workspaceId: WorkspaceId, query: string): Promise<KbSearchResult> {
-    const hits: KbSearchHit[] = [];
+    const weights = this.config.fusionWeights ?? { internal: 0.6, external: 0.4 };
+    const lists: KbSearchHit[][] = [];
 
     if (this.config.internal?.enabled) {
-      hits.push(...(await this.internal.search(workspaceId, query)));
+      lists.push(await this.internal.search(workspaceId, query));
     }
-
     if (this.config.externalMcp) {
       const ext = new ExternalMcpKbConnector(this.config.externalMcp);
-      hits.push(...(await ext.search(query)));
+      lists.push(await ext.search(query));
     }
 
-    hits.sort((a, b) => b.score - a.score);
+    if (lists.length <= 1) {
+      const hits = lists[0] ?? [];
+      hits.sort((a, b) => b.score - a.score);
+      return { query, hits };
+    }
+
+    const hits = reciprocalRankFusion(lists, [weights.internal, weights.external]);
     return { query, hits };
   }
 }

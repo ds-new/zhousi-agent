@@ -8,9 +8,9 @@
     "services/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w @diy-agent/domain && npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run build && node --import tsx --test services/control-plane/test/**/*.test.ts packages/domain/test/**/*.test.ts packages/eval-harness/test/**/*.test.ts packages/dsh-memory-plugin/test/**/*.test.ts",
+    "test": "npm run build && node --import tsx --test packages/domain/test/**/*.test.ts packages/eval-harness/test/**/*.test.ts packages/dsh-memory-plugin/test/**/*.test.ts services/control-plane/test/**/*.test.ts",
     "dev:control-plane": "npm run dev -w @diy-agent/control-plane",
     "dev:evolution": "cd services/evolution && PYTHONPATH=. python3 server.py",
     "dev:data-plane": "bash scripts/run-data-plane.sh"

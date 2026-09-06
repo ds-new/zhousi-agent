@@ -4,16 +4,20 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./server": "./dist/server.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "node --watch dist/index.js",
-    "start": "node dist/index.js",
-    "test": "node --import tsx --test test/**/*.test.ts"
+    "start": "node dist/index.js"
   },
   "dependencies": {
-    "@diy-agent/domain": "*",
     "@diy-agent/db": "*",
+    "@diy-agent/domain": "*",
+    "@diy-agent/eval-harness": "*",
     "@diy-agent/kb-rag": "*",
     "@diy-agent/orchestrator": "*"
   },

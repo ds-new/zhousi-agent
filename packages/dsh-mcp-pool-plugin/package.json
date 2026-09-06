@@ -13,8 +13,7 @@
     "@diy-agent/domain": "*"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-mcp-client": "*"
+    "@deepseek-ai/cordis": "*"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

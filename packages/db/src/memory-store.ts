@@ -1,12 +1,20 @@
-import type {
-  AgentProfile,
-  AgentProfileVersion,
-  EvolutionRun,
-  Session,
-  Tenant,
-  Workspace,
+import {
+  DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
+  SESSION_TOKEN_TTL_MS,
+  resolveModelRoute,
+  type AgentProfile,
+  type AgentProfileVersion,
+  type AuditEvent,
+  type CredentialRefRecord,
+  type EvalTask,
+  type EvolutionRun,
+  type McpCatalogEntry,
+  type ProfileId,
+  type SkillCatalogEntry,
+  type Tenant,
+  type TenantGateway,
+  type WebhookRegistration,
 } from "@diy-agent/domain";
-import { DEFAULT_EVOLUTION_SIGNAL_THRESHOLD, resolveModelRoute } from "@diy-agent/domain";
 import type {
   ControlPlaneStore,
   CreateEvolutionRunInput,
@@ -14,20 +22,64 @@ import type {
   CreateSessionInput,
   CreateTenantInput,
   CreateWorkspaceInput,
+  EvalTraceRecord,
+  QuotaCheckResult,
+  SessionCreateResult,
   TriggerEvolutionSignalInput,
 } from "./types.js";
 import { defaultGateway } from "./types.js";
 
-export class MemoryStore implements ControlPlaneStore {
-  private tenants = new Map<string, Tenant>();
-  private workspaces = new Map<string, Workspace>();
-  private profiles = new Map<string, AgentProfile>();
-  private profileVersions = new Map<string, AgentProfileVersion>();
-  private sessions = new Map<string, Session>();
-  private evolutionRuns = new Map<string, EvolutionRun>();
+interface RateWindow {
+  count: number;
+  windowStart: number;
+}
 
-  async getProfile(id: AgentProfile["id"]): Promise<AgentProfile | null> {
+export class MemoryStore implements ControlPlaneStore {
+  protected tenants = new Map<string, Tenant>();
+  protected workspaces = new Map<string, import("@diy-agent/domain").Workspace>();
+  protected profiles = new Map<string, AgentProfile>();
+  protected profileVersions = new Map<string, AgentProfileVersion>();
+  protected sessions = new Map<string, import("@diy-agent/domain").Session>();
+  protected evolutionRuns = new Map<string, EvolutionRun>();
+  protected goldenTasks = new Map<string, EvalTask>();
+  protected traces = new Map<string, EvalTraceRecord>();
+  protected skills = new Map<string, SkillCatalogEntry>();
+  protected mcpCatalog = new Map<string, McpCatalogEntry>();
+  protected credentialRefs = new Map<string, CredentialRefRecord>();
+  protected auditLog: AuditEvent[] = [];
+  protected webhooks = new Map<string, WebhookRegistration>();
+  protected sessionTokens = new Map<string, { workspaceId: string; expiresAt: number }>();
+  protected tokenUsageByTenant = new Map<string, { day: string; tokens: number }>();
+  protected rateWindows = new Map<string, RateWindow>();
+
+  async getProfile(id: ProfileId): Promise<AgentProfile | null> {
     return this.profiles.get(id) ?? null;
+  }
+
+  async getProfileVersion(
+    profileId: ProfileId,
+    versionId: AgentProfileVersion["id"],
+  ): Promise<AgentProfileVersion | null> {
+    const version = this.profileVersions.get(versionId);
+    if (!version || version.profileId !== profileId) return null;
+    return version;
+  }
+
+  async getLatestProfileVersion(profileId: ProfileId): Promise<AgentProfileVersion | null> {
+    const versions = [...this.profileVersions.values()].filter((v) => v.profileId === profileId);
+    if (versions.length === 0) return null;
+    return versions.sort((a, b) => b.version - a.version)[0] ?? null;
+  }
+
+  async pinProfile(
+    profileId: ProfileId,
+    versionId: AgentProfileVersion["id"],
+  ): Promise<AgentProfile | null> {
+    const profile = this.profiles.get(profileId);
+    const version = this.profileVersions.get(versionId);
+    if (!profile || !version || version.profileId !== profileId) return null;
+    profile.pinnedVersionId = versionId;
+    return profile;
   }
 
   async createTenant(input: CreateTenantInput): Promise<Tenant> {
@@ -48,22 +100,17 @@ export class MemoryStore implements ControlPlaneStore {
     return this.tenants.get(id) ?? null;
   }
 
-  async updateTenantGateway(
-    id: Tenant["id"],
-    gateway: Tenant["gateway"]
-  ): Promise<Tenant | null> {
+  async updateTenantGateway(id: Tenant["id"], gateway: TenantGateway): Promise<Tenant | null> {
     const tenant = this.tenants.get(id);
     if (!tenant) return null;
     tenant.gateway = gateway;
     return tenant;
   }
 
-  async createWorkspace(
-    input: CreateWorkspaceInput
-  ): Promise<Workspace | null> {
+  async createWorkspace(input: CreateWorkspaceInput) {
     if (!this.tenants.has(input.tenantId)) return null;
-    const id = crypto.randomUUID() as Workspace["id"];
-    const ws: Workspace = {
+    const id = crypto.randomUUID() as import("@diy-agent/domain").Workspace["id"];
+    const ws = {
       id,
       tenantId: input.tenantId,
       name: input.name ?? "default",
@@ -87,7 +134,7 @@ export class MemoryStore implements ControlPlaneStore {
       throw new Error("model_provider_not_allowed");
     }
 
-    const profileId = crypto.randomUUID() as AgentProfile["id"];
+    const profileId = crypto.randomUUID() as ProfileId;
     const profile: AgentProfile = {
       id: profileId,
       workspaceId: input.workspaceId,
@@ -111,29 +158,76 @@ export class MemoryStore implements ControlPlaneStore {
       createdAt: new Date(),
       approvalStatus: "approved",
     };
-
-    profile.pinnedVersionId = versionId;
+    profile.pinnedVersionId = undefined;
     this.profiles.set(profileId, profile);
     this.profileVersions.set(versionId, version);
     return { profile, version };
   }
 
-  async createSession(input: CreateSessionInput) {
+  async checkSessionQuota(tenantId: Tenant["id"]): Promise<QuotaCheckResult> {
+    const tenant = this.tenants.get(tenantId);
+    if (!tenant) return { allowed: false, reason: "tenant_not_found" };
+
+    const rate = this.checkRateLimit(tenantId, tenant.gateway.rateLimitRpm ?? 600);
+    if (!rate.allowed) return rate;
+
+    const usage = this.getTokenUsage(tenantId);
+    const max = tenant.gateway.maxTokensPerDay;
+    if (max !== undefined && usage.tokens >= max) {
+      return { allowed: false, reason: "daily_token_quota_exceeded", tokensUsedToday: usage.tokens };
+    }
+    if (max !== undefined && usage.tokens >= max * 0.8) {
+      return { allowed: true, warning: true, tokensUsedToday: usage.tokens };
+    }
+    return { allowed: true, tokensUsedToday: usage.tokens };
+  }
+
+  async recordTokenUsage(tenantId: Tenant["id"], tokens: number): Promise<QuotaCheckResult> {
+    const usage = this.getTokenUsage(tenantId);
+    usage.tokens += tokens;
+    this.tokenUsageByTenant.set(tenantId, usage);
+    return this.checkSessionQuota(tenantId);
+  }
+
+  async createSession(input: CreateSessionInput): Promise<SessionCreateResult | null> {
+    const quota = await this.checkSessionQuota(input.tenantId);
+    if (!quota.allowed) return null;
+
     const profile = this.profiles.get(input.profileId);
     if (!profile?.pinnedVersionId) return null;
+
     const ws = this.workspaces.get(profile.workspaceId);
     if (!ws || ws.tenantId !== input.tenantId) return null;
 
-    const sessionId = crypto.randomUUID() as Session["id"];
-    const session: Session = {
+    const sessionId = crypto.randomUUID() as import("@diy-agent/domain").Session["id"];
+    const now = new Date();
+    const session = {
       id: sessionId,
       workspaceId: profile.workspaceId,
       profileId: profile.id,
       profileVersionId: profile.pinnedVersionId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
     };
     this.sessions.set(sessionId, session);
+
+    const sessionToken = `sess_${crypto.randomUUID().replace(/-/g, "")}`;
+    const expiresAt = Date.now() + SESSION_TOKEN_TTL_MS;
+    this.sessionTokens.set(sessionToken, {
+      workspaceId: profile.workspaceId,
+      expiresAt,
+    });
+
+    await this.appendAudit({
+      tenantId: input.tenantId,
+      workspaceId: profile.workspaceId,
+      action: "session.created",
+      metadata: {
+        sessionId,
+        profileId: profile.id,
+        profileVersionId: profile.pinnedVersionId,
+      },
+    });
 
     return {
       session,
@@ -143,14 +237,120 @@ export class MemoryStore implements ControlPlaneStore {
         "diy.profileId": profile.id,
         "diy.profileVersionId": profile.pinnedVersionId,
       },
+      sessionToken,
+      sessionTokenExpiresAt: new Date(expiresAt),
     };
   }
 
-  async createEvolutionRun(
-    input: CreateEvolutionRunInput
-  ): Promise<EvolutionRun | null> {
+  async createGoldenTask(task: Omit<EvalTask, "id">): Promise<EvalTask> {
+    const entry: EvalTask = { ...task, id: crypto.randomUUID() };
+    this.goldenTasks.set(entry.id, entry);
+    return entry;
+  }
+
+  async listGoldenTasks(profileId: ProfileId): Promise<EvalTask[]> {
+    return [...this.goldenTasks.values()].filter((t) => t.profileId === profileId);
+  }
+
+  async saveTrace(trace: Omit<EvalTraceRecord, "id" | "createdAt">): Promise<EvalTraceRecord> {
+    const entry: EvalTraceRecord = {
+      ...trace,
+      id: crypto.randomUUID(),
+      createdAt: new Date(),
+    };
+    this.traces.set(entry.id, entry);
+    return entry;
+  }
+
+  async listTraces(profileId: ProfileId, limit = 50): Promise<EvalTraceRecord[]> {
+    return [...this.traces.values()]
+      .filter((t) => t.profileId === profileId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit);
+  }
+
+  async registerSkill(
+    entry: Omit<SkillCatalogEntry, "id" | "createdAt">,
+  ): Promise<SkillCatalogEntry> {
+    const skill: SkillCatalogEntry = {
+      ...entry,
+      id: crypto.randomUUID(),
+      createdAt: new Date(),
+    };
+    this.skills.set(skill.id, skill);
+    return skill;
+  }
+
+  async listSkills(
+    tenantId: Tenant["id"],
+    workspaceId?: import("@diy-agent/domain").Workspace["id"],
+  ): Promise<SkillCatalogEntry[]> {
+    return [...this.skills.values()].filter(
+      (s) =>
+        s.tenantId === tenantId &&
+        (workspaceId === undefined || s.workspaceId === undefined || s.workspaceId === workspaceId),
+    );
+  }
+
+  async registerMcp(entry: Omit<McpCatalogEntry, "createdAt">): Promise<McpCatalogEntry> {
+    const key = `${entry.tenantId}:${entry.serverName}`;
+    const mcp: McpCatalogEntry = { ...entry, createdAt: new Date() };
+    this.mcpCatalog.set(key, mcp);
+    return mcp;
+  }
+
+  async approveMcp(tenantId: Tenant["id"], serverName: string): Promise<McpCatalogEntry | null> {
+    const key = `${tenantId}:${serverName}`;
+    const entry = this.mcpCatalog.get(key);
+    if (!entry) return null;
+    entry.approvalStatus = "approved";
+    return entry;
+  }
+
+  async listMcp(tenantId: Tenant["id"]): Promise<McpCatalogEntry[]> {
+    return [...this.mcpCatalog.values()].filter((m) => m.tenantId === tenantId);
+  }
+
+  async registerCredentialRef(
+    entry: Omit<CredentialRefRecord, "id" | "createdAt">,
+  ): Promise<CredentialRefRecord> {
+    const ref: CredentialRefRecord = {
+      ...entry,
+      id: crypto.randomUUID(),
+      createdAt: new Date(),
+    };
+    this.credentialRefs.set(ref.id, ref);
+    return ref;
+  }
+
+  async appendAudit(event: Omit<AuditEvent, "id" | "createdAt">): Promise<AuditEvent> {
+    const record: AuditEvent = {
+      ...event,
+      id: crypto.randomUUID(),
+      createdAt: new Date(),
+    };
+    this.auditLog.push(record);
+    return record;
+  }
+
+  async registerWebhook(
+    entry: Omit<WebhookRegistration, "id" | "createdAt">,
+  ): Promise<WebhookRegistration> {
+    const hook: WebhookRegistration = {
+      ...entry,
+      id: crypto.randomUUID(),
+      createdAt: new Date(),
+    };
+    this.webhooks.set(hook.id, hook);
+    return hook;
+  }
+
+  async createEvolutionRun(input: CreateEvolutionRunInput): Promise<EvolutionRun | null> {
     const profile = this.profiles.get(input.profileId);
-    if (!profile?.pinnedVersionId) return null;
+    if (!profile) return null;
+    const baseVersionId =
+      profile.pinnedVersionId ?? (await this.getLatestProfileVersion(input.profileId))?.id;
+    if (!baseVersionId) return null;
     const ws = this.workspaces.get(profile.workspaceId);
     if (!ws || ws.tenantId !== input.tenantId) return null;
 
@@ -160,7 +360,7 @@ export class MemoryStore implements ControlPlaneStore {
     const run: EvolutionRun = {
       id: crypto.randomUUID(),
       profileId: profile.id,
-      baseVersionId: profile.pinnedVersionId,
+      baseVersionId,
       tier,
       trigger: input.trigger,
       target: input.target ?? "skill",
@@ -180,14 +380,11 @@ export class MemoryStore implements ControlPlaneStore {
     if (input.passRate >= threshold) {
       return { skipped: true as const, reason: "pass_rate_above_threshold" };
     }
-
     const profile = this.profiles.get(input.profileId);
     if (!profile) return { skipped: true as const, reason: "profile_not_found" };
-
     if (profile.governanceTier !== "L1" && profile.governanceTier !== "L0") {
       return { skipped: true as const, reason: "signal_only_for_l0_l1" };
     }
-
     const run = await this.createEvolutionRun({
       profileId: input.profileId,
       tenantId: input.tenantId,
@@ -195,5 +392,33 @@ export class MemoryStore implements ControlPlaneStore {
       tier: profile.governanceTier,
     });
     return run!;
+  }
+
+  protected checkRateLimit(tenantId: string, rpm: number): QuotaCheckResult {
+    const now = Date.now();
+    const windowMs = 60_000;
+    let window = this.rateWindows.get(tenantId);
+    if (!window || now - window.windowStart >= windowMs) {
+      window = { count: 0, windowStart: now };
+    }
+    window.count += 1;
+    this.rateWindows.set(tenantId, window);
+    if (window.count > rpm) {
+      return { allowed: false, reason: "rate_limit_exceeded" };
+    }
+    return { allowed: true };
+  }
+
+  protected getTokenUsage(tenantId: string) {
+    const day = new Date().toISOString().slice(0, 10);
+    const existing = this.tokenUsageByTenant.get(tenantId);
+    if (!existing || existing.day !== day) {
+      return { day, tokens: 0 };
+    }
+    return existing;
+  }
+
+  async close(): Promise<void> {
+    return;
   }
 }

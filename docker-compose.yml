@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: diy
+      POSTGRES_PASSWORD: diy
+      POSTGRES_DB: diy_agent
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U diy -d diy_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile.control-plane
+    environment:
+      DATABASE_URL: postgres://diy:diy@postgres:5432/diy_agent
+      DIY_CONTROL_PLANE_PORT: "9878"
+      DIY_EVOLUTION_URL: http://evolution:9880
+    ports:
+      - "9878:9878"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      evolution:
+        condition: service_started
+
+  evolution:
+    build:
+      context: .
+      dockerfile: Dockerfile.evolution
+    environment:
+      DIY_EVOLUTION_PORT: "9880"
+    ports:
+      - "9880:9880"

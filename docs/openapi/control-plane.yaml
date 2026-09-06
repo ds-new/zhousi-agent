@@ -1,0 +1,35 @@
+openapi: 3.1.0
+info:
+  title: DIY Agent Control Plane
+  version: 0.1.0
+paths:
+  /health:
+    get:
+      summary: Health check
+  /tenants:
+    post:
+      summary: Create Tenant
+  /workspaces:
+    post:
+      summary: Create Workspace
+  /profiles:
+    post:
+      summary: Create Agent Profile
+  /profiles/{profileId}/versions/{versionId}:
+    get:
+      summary: Pull pinned Profile snapshot for Data Plane sync
+  /profiles/{profileId}/pin:
+    post:
+      summary: Pin Profile version after Pin Gate
+  /sessions:
+    post:
+      summary: Create Session with scoped token
+  /golden-tasks:
+    post:
+      summary: Register Golden Task
+  /traces:
+    post:
+      summary: Ingest Eval Trace
+  /evolution/runs:
+    post:
+      summary: Start Evolution Run

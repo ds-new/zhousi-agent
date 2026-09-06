@@ -1,3 +1,5 @@
+export { MemoryStore } from "./memory-store.js";
+export { PostgresStore, createStore } from "./postgres-store.js";
 export type {
   ControlPlaneStore,
   CreateEvolutionRunInput,
@@ -5,8 +7,9 @@ export type {
   CreateSessionInput,
   CreateTenantInput,
   CreateWorkspaceInput,
+  EvalTraceRecord,
+  QuotaCheckResult,
+  SessionCreateResult,
   TriggerEvolutionSignalInput,
 } from "./types.js";
 export { defaultGateway } from "./types.js";
-export { MemoryStore } from "./memory-store.js";
-export { PostgresStore, createStore } from "./postgres-store.js";
