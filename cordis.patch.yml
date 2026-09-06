@@ -1,0 +1,17 @@
+# DSH overlay — insert diy-agent plugins into base bundle
+# Use with: dsh --profile web --patch ./cordis.patch.yml
+
+- insert:
+  - id: diy-tenant
+    name: "@diy-agent/dsh-tenant-plugin"
+    config:
+      controlPlaneUrl: !!js "process.env.DIY_CONTROL_PLANE_URL ?? 'http://127.0.0.1:9878'"
+  - id: diy-memory
+    name: "@diy-agent/dsh-memory-plugin"
+  - id: diy-mcp-pool
+    name: "@diy-agent/dsh-mcp-pool-plugin"
+    config:
+      warmPoolDefault: true
+      idleTimeoutMs: 300000
+  - id: diy-orchestrator
+    name: "@diy-agent/dsh-orchestrator-plugin"

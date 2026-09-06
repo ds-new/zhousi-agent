@@ -1,0 +1,25 @@
+{
+  "name": "diy-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ToB multi-tenant self-evolving agent platform",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run build && node --import tsx --test services/control-plane/test/**/*.test.ts packages/domain/test/**/*.test.ts packages/eval-harness/test/**/*.test.ts packages/dsh-memory-plugin/test/**/*.test.ts",
+    "dev:control-plane": "npm run dev -w @diy-agent/control-plane",
+    "dev:evolution": "cd services/evolution && PYTHONPATH=. python3 server.py",
+    "dev:data-plane": "bash scripts/run-data-plane.sh"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
