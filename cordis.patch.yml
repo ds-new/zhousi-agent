@@ -18,3 +18,5 @@
     name: "@diy-agent/dsh-policy-plugin"
   - id: diy-trace
     name: "@diy-agent/dsh-trace-plugin"
+  - id: diy-kb
+    name: "@diy-agent/dsh-kb-plugin"

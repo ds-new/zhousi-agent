@@ -44,10 +44,11 @@ paths:
       summary: List Eval Traces (90-day retention)
   /kb/documents:
     post:
-      summary: Ingest document into Workspace internal KB (pgvector)
+      summary: Ingest document into Workspace internal KB (proxied to Data Plane; Phase B adds Kb Document Registry on CP)
   /kb/search:
     post:
-      summary: Hybrid KB search (internal vector + external MCP)
+      summary: Hybrid KB search (deprecated — proxied to Data Plane POST /kb/search)
+      deprecated: true
   /audit:
     get:
       summary: List tenant audit events

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { describe, it, before, after } from "node:test";
-import { resetInternalIndexForTests, type McpKbSearchClient } from "@diy-agent/kb-rag";
+import { describe, it } from "node:test";
 import { createControlPlaneServer } from "../src/server.js";
+import { createCpDpHarness } from "./kb-test-helpers.js";
 
 async function request(
   baseUrl: string,
@@ -19,12 +19,8 @@ async function request(
 }
 
 describe("Sprint 2b — external MCP KB, webhooks, audit log", () => {
-  before(() => {
-    resetInternalIndexForTests();
-  });
-
-  it("fuses internal KB with external MCP search results", async () => {
-    const mockClient: McpKbSearchClient = {
+  it("fuses internal KB with external MCP search results via Data Plane", async () => {
+    const mockClient: import("@diy-agent/kb-rag").McpKbSearchClient = {
       async search() {
         return [
           {
@@ -37,8 +33,7 @@ describe("Sprint 2b — external MCP KB, webhooks, audit log", () => {
         ];
       },
     };
-    const cp = createControlPlaneServer({ port: 0, mcpKbSearchClient: mockClient });
-    await new Promise<void>((resolve) => cp.server.once("listening", resolve));
+    const { cp, close } = await createCpDpHarness({ mcpKbSearchClient: mockClient });
     try {
       const { json: tenant } = await request(cp.baseUrl, "POST", "/tenants", { name: "FusionCo" });
       const { json: ws } = await request(cp.baseUrl, "POST", "/workspaces", { tenantId: tenant.id });
@@ -74,7 +69,7 @@ describe("Sprint 2b — external MCP KB, webhooks, audit log", () => {
       assert.ok(hits.some((hit) => hit.source === "external_mcp"));
       assert.ok(hits.some((hit) => hit.source === "internal"));
     } finally {
-      await cp.close();
+      await close();
     }
   });
 

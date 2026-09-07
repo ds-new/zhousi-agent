@@ -1,19 +1,45 @@
 /**
  * Minimal Data Plane HTTP surface for Enterprise deployments (:3080).
  */
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
+import {
+  createKbRuntime,
+  handleKbDocumentHttp,
+  handleKbSearchHttp,
+  validateInternalToken,
+  type KbRuntime,
+  type KbRuntimeDeps,
+} from "@diy-agent/dsh-kb-plugin";
 import {
   getCachedProfileSync,
   handleProfilePinnedWebhook,
 } from "@diy-agent/dsh-profile-sync-plugin";
 
+export interface DataPlaneServerOptions {
+  port?: number;
+  internalToken?: string;
+  kbRuntime?: KbRuntime;
+  kbRuntimeDeps?: KbRuntimeDeps;
+}
+
 export interface DataPlaneServer {
   server: ReturnType<typeof createServer>;
   baseUrl: string;
+  kbRuntime: KbRuntime;
   close: () => Promise<void>;
 }
 
-export function createDataPlaneServer(port = 0): DataPlaneServer {
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  if (chunks.length === 0) return {};
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+}
+
+export function createDataPlaneServer(options: DataPlaneServerOptions = {}): DataPlaneServer {
+  const internalToken = options.internalToken ?? process.env.DIY_DATA_PLANE_INTERNAL_TOKEN;
+  const kbRuntime = options.kbRuntime ?? createKbRuntime(options.kbRuntimeDeps);
+
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const respond = (status: number, body: unknown) => {
@@ -62,13 +88,30 @@ export function createDataPlaneServer(port = 0): DataPlaneServer {
       return;
     }
 
+    if (req.method === "POST" && (url.pathname === "/kb/search" || url.pathname === "/kb/documents")) {
+      if (!validateInternalToken(req, internalToken)) {
+        return respond(401, { error: "unauthorized" });
+      }
+      void (async () => {
+        const body = await readJsonBody(req);
+        const result =
+          url.pathname === "/kb/search"
+            ? await handleKbSearchHttp(kbRuntime, body)
+            : await handleKbDocumentHttp(kbRuntime, body);
+        respond(result.status, result.body);
+      })().catch(() => respond(500, { error: "kb_handler_failed" }));
+      return;
+    }
+
     respond(404, { error: "not_found" });
   });
 
-  server.listen(port, "127.0.0.1");
+  const listenPort = options.port ?? 0;
+  server.listen(listenPort, "127.0.0.1");
 
   return {
     server,
+    kbRuntime,
     get baseUrl() {
       const addr = server.address();
       if (!addr || typeof addr === "string") return "";
@@ -83,7 +126,7 @@ export function createDataPlaneServer(port = 0): DataPlaneServer {
 
 export async function startDataPlaneFromEnv(): Promise<DataPlaneServer> {
   const port = Number(process.env.DIY_DATA_PLANE_PORT ?? 3080);
-  const dp = createDataPlaneServer(port);
+  const dp = createDataPlaneServer({ port });
   await new Promise<void>((resolve) => dp.server.once("listening", resolve));
   return dp;
 }

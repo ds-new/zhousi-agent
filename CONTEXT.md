@@ -30,6 +30,10 @@ _Avoid_: Context, History
 Workspace 级文档检索层，可混合内部向量索引与外部 MCP 连接器。
 _Avoid_: RAG store, Vector DB
 
+**Kb Document Registry**:
+Control Plane 侧的 KB 文档索引元数据（documentId、title、contentHash、时间戳）；正文与向量 embedding 仅存 Data Plane tenant schema。
+_Avoid_: KB metadata table, Document catalog
+
 ## 扩展与治理
 
 **Skill**:

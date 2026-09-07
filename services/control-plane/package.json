@@ -19,7 +19,6 @@
     "@diy-agent/db": "*",
     "@diy-agent/domain": "*",
     "@diy-agent/eval-harness": "*",
-    "@diy-agent/kb-rag": "*",
     "@diy-agent/orchestrator": "*"
   },
   "devDependencies": {

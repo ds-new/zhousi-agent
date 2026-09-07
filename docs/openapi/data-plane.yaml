@@ -1,0 +1,18 @@
+openapi: 3.1.0
+info:
+  title: DIY Agent Data Plane
+  version: 0.1.0
+paths:
+  /health:
+    get:
+      summary: Health check
+  /kb/search:
+    post:
+      summary: Hybrid Knowledge Base search (internal vector + external MCP)
+      deprecated: false
+  /kb/documents:
+    post:
+      summary: Ingest document into Workspace internal KB (tenant schema / memory adapter)
+  /webhooks/profile-sync:
+    post:
+      summary: Receive profile.pinned webhook for Enterprise profile sync cache

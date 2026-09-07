@@ -11,6 +11,7 @@
     "dev": "node --watch dist/index.js"
   },
   "dependencies": {
+    "@diy-agent/dsh-kb-plugin": "*",
     "@diy-agent/dsh-profile-sync-plugin": "*",
     "@diy-agent/dsh-vault-plugin": "*"
   },

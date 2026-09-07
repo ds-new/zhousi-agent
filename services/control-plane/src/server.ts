@@ -2,11 +2,9 @@
  * Control Plane HTTP server — testable factory + route handlers.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { HybridKbService, PostgresKbStore, type McpKbSearchClient } from "@diy-agent/kb-rag";
 import { createOrchestrator } from "@diy-agent/orchestrator";
 import {
   MemoryStore,
-  PostgresStore,
   createStore,
   type ControlPlaneStore,
   type QuotaCheckResult,
@@ -29,6 +27,7 @@ import {
   type ServiceAccountMode,
 } from "./auth-middleware.js";
 import { collectCredentialRefIds, runProfileEvaluation } from "./profile-eval.js";
+import { proxyKbDocumentIngest, proxyKbSearch, type DataPlaneFetch } from "./kb-proxy.js";
 import type { JwksOidcConfig } from "@diy-agent/auth";
 
 export interface ControlPlaneServer {
@@ -44,12 +43,14 @@ export interface CreateControlPlaneOptions {
   storage?: "memory" | "postgres";
   evolutionInvoker?: typeof invokeEvolutionService;
   webhookFetch?: WebhookFetch;
-  mcpKbSearchClient?: McpKbSearchClient;
   authMode?: AuthMode;
   serviceAccountMode?: ServiceAccountMode;
   serviceAccountToken?: string;
   platformAdminKey?: string;
   jwksOidc?: JwksOidcConfig;
+  dataPlaneUrl?: string;
+  dataPlaneInternalToken?: string;
+  dataPlaneFetch?: DataPlaneFetch;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -97,7 +98,11 @@ export function createControlPlaneServer(
     token: options.serviceAccountToken,
   };
   const platformAdminKey = options.platformAdminKey;
-  const kbServices = new Map<string, HybridKbService>();
+  const kbProxyOptions = {
+    dataPlaneUrl: options.dataPlaneUrl,
+    dataPlaneInternalToken: options.dataPlaneInternalToken,
+    fetchImpl: options.dataPlaneFetch,
+  };
 
   async function fireWebhooks(
     tenantId: string,
@@ -105,27 +110,6 @@ export function createControlPlaneServer(
     payload: Record<string, unknown>,
   ): Promise<void> {
     await dispatchWebhooks(store, tenantId, event, payload, webhookFetch);
-  }
-
-  async function resolveKbService(profile: AgentProfile): Promise<HybridKbService> {
-    let svc = kbServices.get(profile.id);
-    if (!svc) {
-      const tenant = await store.getTenantForProfile(profile.id);
-      let internalStore;
-      if (tenant && store instanceof PostgresStore) {
-        internalStore = new PostgresKbStore(store.getPool(), tenant.dbSchema);
-      }
-      svc = new HybridKbService(
-        profile.kbConfig ?? { internal: { enabled: true } },
-        internalStore,
-        options.mcpKbSearchClient,
-        tenant
-          ? { tenantId: tenant.id, workspaceId: profile.workspaceId }
-          : { workspaceId: profile.workspaceId },
-      );
-      kbServices.set(profile.id, svc);
-    }
-    return svc;
   }
 
   async function route(
@@ -884,13 +868,19 @@ export function createControlPlaneServer(
       }
       const profile = await store.getProfile(body.profileId as ProfileId);
       if (!profile) return json(res, 404, { error: "profile_not_found" });
-      const doc = await (await resolveKbService(profile)).ingest(
-        profile.workspaceId,
-        body.title as string,
-        body.content as string,
-      );
-      if (!doc) return json(res, 400, { error: "internal_kb_disabled" });
-      return json(res, 201, doc);
+      const tenant = await store.getTenantForProfile(profile.id);
+      try {
+        const proxied = await proxyKbDocumentIngest(
+          kbProxyOptions,
+          profile,
+          tenant?.id,
+          body.title as string,
+          body.content as string,
+        );
+        return json(res, proxied.status, proxied.json);
+      } catch {
+        return json(res, 502, { error: "data_plane_unavailable" });
+      }
     }
 
     if (method === "POST" && path === "/kb/search") {
@@ -900,11 +890,20 @@ export function createControlPlaneServer(
       }
       const profile = await store.getProfile(body.profileId as ProfileId);
       if (!profile) return json(res, 404, { error: "profile_not_found" });
-      const result = await (await resolveKbService(profile)).search(
-        profile.workspaceId,
-        body.query as string,
-      );
-      return json(res, 200, result);
+      const tenant = await store.getTenantForProfile(profile.id);
+      try {
+        const proxied = await proxyKbSearch(
+          kbProxyOptions,
+          profile,
+          tenant?.id,
+          body.query as string,
+        );
+        res.setHeader("Deprecation", "true");
+        res.setHeader("Link", '<http://data-plane/kb/search>; rel="successor-version"');
+        return json(res, proxied.status, proxied.json);
+      } catch {
+        return json(res, 502, { error: "data_plane_unavailable" });
+      }
     }
 
     if (method === "POST" && path === "/orchestration/run") {

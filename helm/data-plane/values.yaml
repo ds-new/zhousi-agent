@@ -15,5 +15,8 @@ env:
   tenantId: ""
   enterpriseMode: "true"
   kmsKeyMaterial: ""
+  databaseUrl: ""
+  tenantDbSchema: ""
+  dataPlaneInternalToken: ""
 
 resources: {}

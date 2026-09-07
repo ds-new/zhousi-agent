@@ -16,10 +16,14 @@ export type EvolutionTrigger = "manual" | "signal" | "scheduled";
 export type PolicyEffect = "allow" | "deny" | "ask";
 export type McpApprovalStatus = "pending" | "approved" | "rejected";
 
+export type KbRetrievalMode = "tool" | "auto";
+
 export interface KnowledgeBaseConfig {
   internal?: { enabled: boolean; embeddingModel?: string };
   externalMcp?: McpBinding;
   fusionWeights?: { internal: number; external: number };
+  /** Default: tool — LLM invokes kb_search; auto injects context on turn-start (Phase B). */
+  retrievalMode?: KbRetrievalMode;
 }
 
 export interface OrchestrationConfig {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { resetInternalIndexForTests } from "@diy-agent/kb-rag";
 import { createControlPlaneServer } from "../src/server.js";
+import { createCpDpHarness } from "./kb-test-helpers.js";
 import type { EvolutionRunRequest, EvolutionRunResponse } from "../src/evolution-client.js";
 
 async function request(
@@ -20,10 +20,6 @@ async function request(
 }
 
 describe("Sprint 2a — KB vectors, trace TTL, evolution context", () => {
-  before(() => {
-    resetInternalIndexForTests();
-  });
-
   const cp = createControlPlaneServer({ port: 0 });
 
   before(async () => {
@@ -34,36 +30,41 @@ describe("Sprint 2a — KB vectors, trace TTL, evolution context", () => {
     await cp.close();
   });
 
-  it("ingests and vector-searches internal KB documents", async () => {
-    const { json: tenant } = await request(cp.baseUrl, "POST", "/tenants", { name: "KbCo" });
-    const { json: ws } = await request(cp.baseUrl, "POST", "/workspaces", { tenantId: tenant.id });
-    const { json: profileResult } = await request(cp.baseUrl, "POST", "/profiles", {
-      tenantId: tenant.id,
-      workspaceId: ws.id,
-      name: "kb-bot",
-    });
-    const profileId = (profileResult.profile as Record<string, unknown>).id as string;
+  it("ingests and vector-searches internal KB documents via Data Plane proxy", async () => {
+    const { cp: cpWithDp, close } = await createCpDpHarness();
+    try {
+      const { json: tenant } = await request(cpWithDp.baseUrl, "POST", "/tenants", { name: "KbCo" });
+      const { json: ws } = await request(cpWithDp.baseUrl, "POST", "/workspaces", { tenantId: tenant.id });
+      const { json: profileResult } = await request(cpWithDp.baseUrl, "POST", "/profiles", {
+        tenantId: tenant.id,
+        workspaceId: ws.id,
+        name: "kb-bot",
+      });
+      const profileId = (profileResult.profile as Record<string, unknown>).id as string;
 
-    await request(cp.baseUrl, "POST", "/kb/documents", {
-      profileId,
-      title: "Returns",
-      content: "Customers can request a refund within 30 days of purchase.",
-    });
-    await request(cp.baseUrl, "POST", "/kb/documents", {
-      profileId,
-      title: "DevOps",
-      content: "Kubernetes cluster scaling and pod autoscaling.",
-    });
+      await request(cpWithDp.baseUrl, "POST", "/kb/documents", {
+        profileId,
+        title: "Returns",
+        content: "Customers can request a refund within 30 days of purchase.",
+      });
+      await request(cpWithDp.baseUrl, "POST", "/kb/documents", {
+        profileId,
+        title: "DevOps",
+        content: "Kubernetes cluster scaling and pod autoscaling.",
+      });
 
-    const { status, json } = await request(cp.baseUrl, "POST", "/kb/search", {
-      profileId,
-      query: "how do refunds work",
-    });
-    assert.equal(status, 200);
-    const hits = json.hits as Array<Record<string, unknown>>;
-    assert.ok(hits.length >= 1);
-    assert.equal(hits[0]!.title, "Returns");
-    assert.equal(hits[0]!.source, "internal");
+      const { status, json } = await request(cpWithDp.baseUrl, "POST", "/kb/search", {
+        profileId,
+        query: "how do refunds work",
+      });
+      assert.equal(status, 200);
+      const hits = json.hits as Array<Record<string, unknown>>;
+      assert.ok(hits.length >= 1);
+      assert.equal(hits[0]!.title, "Returns");
+      assert.equal(hits[0]!.source, "internal");
+    } finally {
+      await close();
+    }
   });
 
   it("lists traces via GET /profiles/:id/traces", async () => {

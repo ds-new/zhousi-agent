@@ -29,6 +29,12 @@ spec:
               value: {{ .Values.env.enterpriseMode | quote }}
             - name: DIY_KMS_KEY_MATERIAL
               value: {{ .Values.env.kmsKeyMaterial | quote }}
+            - name: DIY_DATABASE_URL
+              value: {{ .Values.env.databaseUrl | quote }}
+            - name: DIY_TENANT_DB_SCHEMA
+              value: {{ .Values.env.tenantDbSchema | quote }}
+            - name: DIY_DATA_PLANE_INTERNAL_TOKEN
+              value: {{ .Values.env.dataPlaneInternalToken | quote }}
 ---
 apiVersion: v1
 kind: Service
