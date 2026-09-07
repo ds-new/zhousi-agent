@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   DEFAULT_PROFILE_PIN_GATE,
   EVAL_TRACE_RETENTION_DAYS,
+  isL1EvolutionSkillTargetAllowed,
   isTraceExpired,
   resolveMcpPoolScope,
   resolveModelRoute,
@@ -46,5 +47,14 @@ describe("domain helpers", () => {
     const now = new Date("2026-01-01T00:00:00Z");
     assert.equal(isTraceExpired(new Date("2025-12-01T00:00:00Z"), now), false);
     assert.equal(isTraceExpired(new Date("2025-09-01T00:00:00Z"), now), true);
+  });
+
+  it("isL1EvolutionSkillTargetAllowed restricts to workspace-private skills", () => {
+    assert.equal(
+      isL1EvolutionSkillTargetAllowed({ source: "private", workspaceId: "ws-1" as never }),
+      true,
+    );
+    assert.equal(isL1EvolutionSkillTargetAllowed({ source: "private" }), false);
+    assert.equal(isL1EvolutionSkillTargetAllowed({ source: "marketplace" }), false);
   });
 });

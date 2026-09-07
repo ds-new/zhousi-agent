@@ -49,13 +49,33 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
       break;
     }
+    case "marketplace:publish": {
+      const result = await request("POST", "/marketplace/skills", {
+        slug: values.name ?? "skill-slug",
+        name: values.name ?? "Marketplace Skill",
+        contentHash: values.tenant ?? "content-hash",
+      });
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
+    case "marketplace:subscribe": {
+      if (!values.tenant) throw new Error("--tenant required");
+      const skillId = positionals[1];
+      if (!skillId) throw new Error("marketplace skill id required");
+      const result = await request("POST", "/marketplace/subscriptions", {
+        tenantId: values.tenant,
+        marketplaceSkillId: skillId,
+      });
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
     case "health": {
       const result = await request("GET", "/health");
       console.log(JSON.stringify(result, null, 2));
       break;
     }
     default:
-      console.log(`Usage: diy-agent <tenant:create|api-key:create|health> [--url] [--api-key] [--tenant] [--name]`);
+      console.log(`Usage: diy-agent <tenant:create|api-key:create|marketplace:publish|marketplace:subscribe|health> [--url] [--api-key] [--tenant] [--name]`);
       process.exit(command ? 1 : 0);
   }
 }

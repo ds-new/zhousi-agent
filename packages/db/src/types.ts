@@ -7,9 +7,12 @@ import type {
   EvalTask,
   EvolutionRun,
   GovernanceTier,
+  MarketplaceSkill,
+  MarketplaceSubscription,
   McpCatalogEntry,
   ProfileId,
   SkillCatalogEntry,
+  SkillEvolutionTarget,
   Tenant,
   TenantGateway,
   WebhookRegistration,
@@ -63,6 +66,15 @@ export interface CreateEvolutionRunInput {
   trigger: EvolutionRun["trigger"];
   target?: EvolutionRun["target"];
   tier?: GovernanceTier;
+  skillId?: string;
+}
+
+export interface PublishMarketplaceSkillInput {
+  slug: string;
+  name: string;
+  description?: string;
+  contentHash: string;
+  version?: string;
 }
 
 export interface TriggerEvolutionSignalInput {
@@ -126,6 +138,23 @@ export interface ControlPlaneStore {
   listTraces(profileId: ProfileId, limit?: number): Promise<EvalTraceRecord[]>;
   registerSkill(entry: Omit<SkillCatalogEntry, "id" | "createdAt">): Promise<SkillCatalogEntry>;
   listSkills(tenantId: Tenant["id"], workspaceId?: Workspace["id"]): Promise<SkillCatalogEntry[]>;
+  resolveSkillEvolutionTarget(
+    tenantId: Tenant["id"],
+    workspaceId: Workspace["id"],
+    skillId: string,
+  ): Promise<SkillEvolutionTarget | null>;
+  publishMarketplaceSkill(input: PublishMarketplaceSkillInput): Promise<MarketplaceSkill>;
+  listMarketplaceSkills(): Promise<MarketplaceSkill[]>;
+  getMarketplaceSkill(id: string): Promise<MarketplaceSkill | null>;
+  subscribeMarketplaceSkill(
+    tenantId: Tenant["id"],
+    marketplaceSkillId: string,
+  ): Promise<MarketplaceSubscription>;
+  unsubscribeMarketplaceSkill(
+    tenantId: Tenant["id"],
+    marketplaceSkillId: string,
+  ): Promise<boolean>;
+  listMarketplaceSubscriptions(tenantId: Tenant["id"]): Promise<MarketplaceSubscription[]>;
   registerMcp(entry: Omit<McpCatalogEntry, "createdAt">): Promise<McpCatalogEntry>;
   approveMcp(tenantId: Tenant["id"], serverName: string): Promise<McpCatalogEntry | null>;
   listMcp(tenantId: Tenant["id"]): Promise<McpCatalogEntry[]>;

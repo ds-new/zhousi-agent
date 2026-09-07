@@ -3,10 +3,14 @@ import { describe, it } from "node:test";
 import {
   authenticateApiKey,
   authenticateBearer,
+  authenticateServiceAccount,
   canPerformWorkspaceAction,
+  createJwksOidcVerifier,
   generateApiKey,
+  generateServiceAccountToken,
   hashApiKey,
   parseDevOidcToken,
+  signDevHs256Jwt,
 } from "../src/index.js";
 
 describe("@diy-agent/auth", () => {
@@ -35,5 +39,29 @@ describe("@diy-agent/auth", () => {
     assert.equal(canPerformWorkspaceAction("builder", "evolution.approve"), false);
     assert.equal(canPerformWorkspaceAction("user", "session.create"), true);
     assert.equal(canPerformWorkspaceAction("user", "profile.create"), false);
+  });
+
+  it("authenticates Data Plane service account tokens", () => {
+    const token = generateServiceAccountToken();
+    assert.ok(authenticateServiceAccount(`Bearer ${token}`, token));
+    assert.equal(authenticateServiceAccount("Bearer diy_sa_wrong", token), false);
+  });
+
+  it("verifies JWKS-style HS256 OIDC tokens", async () => {
+    const secret = "phase3-test-secret";
+    const tenantId = "tenant-jwks" as import("@diy-agent/domain").TenantId;
+    const jwt = signDevHs256Jwt(
+      { iss: "https://idp.example.com", aud: "diy-agent", sub: "alice@corp.com", tenant_id: tenantId },
+      secret,
+    );
+    const verifier = createJwksOidcVerifier({
+      issuer: "https://idp.example.com",
+      audience: "diy-agent",
+      hs256Secrets: { dev: secret },
+    });
+    const ctx = await authenticateBearer(`Bearer ${jwt}`, [], verifier);
+    assert.ok(ctx);
+    assert.equal(ctx!.tenantId, tenantId);
+    assert.equal(ctx!.method, "oidc");
   });
 });

@@ -215,7 +215,35 @@ export interface SkillCatalogEntry {
   name: string;
   contentHash: string;
   source: SkillSource;
+  marketplaceSkillId?: string;
   createdAt: Date;
+}
+
+/** Platform-published Skill available for tenant subscription (Phase 3). */
+export interface MarketplaceSkill {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string;
+  contentHash: string;
+  version: string;
+  publishedAt: Date;
+}
+
+export interface MarketplaceSubscription {
+  tenantId: TenantId;
+  marketplaceSkillId: string;
+  enabledAt: Date;
+}
+
+export interface SkillEvolutionTarget {
+  source: SkillSource;
+  workspaceId?: WorkspaceId;
+}
+
+/** L1 evolution may only mutate workspace-private Skills — not tenant-wide or marketplace Skills. */
+export function isL1EvolutionSkillTargetAllowed(target: SkillEvolutionTarget): boolean {
+  return target.source === "private" && target.workspaceId !== undefined;
 }
 
 export interface McpCatalogEntry {

@@ -70,3 +70,19 @@ paths:
   /evolution/runs:
     post:
       summary: Start Evolution Run
+  /marketplace/skills:
+    get:
+      summary: List platform marketplace Skills
+    post:
+      summary: Publish marketplace Skill (platform admin)
+  /marketplace/skills/{skillId}:
+    get:
+      summary: Get marketplace Skill by id
+  /marketplace/subscriptions:
+    get:
+      summary: List tenant marketplace subscriptions
+    post:
+      summary: Subscribe tenant to marketplace Skill
+  /marketplace/subscriptions/{skillId}:
+    delete:
+      summary: Unsubscribe tenant from marketplace Skill

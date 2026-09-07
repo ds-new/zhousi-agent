@@ -21,9 +21,13 @@ import {
 import { dispatchWebhooks, type WebhookFetch } from "./webhook-dispatcher.js";
 import {
   requireAuth,
+  requirePlatformAdmin,
+  requireServiceAccount,
   requireWorkspacePermission,
   type AuthMode,
+  type ServiceAccountMode,
 } from "./auth-middleware.js";
+import type { JwksOidcConfig } from "@diy-agent/auth";
 
 export interface ControlPlaneServer {
   server: ReturnType<typeof createServer>;
@@ -40,6 +44,10 @@ export interface CreateControlPlaneOptions {
   webhookFetch?: WebhookFetch;
   mcpKbSearchClient?: McpKbSearchClient;
   authMode?: AuthMode;
+  serviceAccountMode?: ServiceAccountMode;
+  serviceAccountToken?: string;
+  platformAdminKey?: string;
+  jwksOidc?: JwksOidcConfig;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -78,7 +86,15 @@ export function createControlPlaneServer(
   const storage = options.storage ?? "memory";
   const evolve = options.evolutionInvoker ?? invokeEvolutionService;
   const webhookFetch = options.webhookFetch ?? globalThis.fetch.bind(globalThis);
-  const authOptions = { mode: options.authMode ?? "none" as AuthMode };
+  const authOptions = {
+    mode: options.authMode ?? ("none" as AuthMode),
+    jwksOidc: options.jwksOidc,
+  };
+  const serviceAccountOptions = {
+    mode: options.serviceAccountMode ?? ("none" as ServiceAccountMode),
+    token: options.serviceAccountToken,
+  };
+  const platformAdminKey = options.platformAdminKey;
   const kbServices = new Map<string, HybridKbService>();
 
   async function fireWebhooks(
@@ -117,7 +133,7 @@ export function createControlPlaneServer(
     path: string,
   ): Promise<void> {
     if (method === "GET" && path === "/health") {
-      return json(res, 200, { ok: true, storage, phase: 1 });
+      return json(res, 200, { ok: true, storage, phase: 3 });
     }
 
     if (method === "POST" && path === "/tenants") {
@@ -202,6 +218,7 @@ export function createControlPlaneServer(
 
     const profileVersionMatch = path.match(/^\/profiles\/([^/]+)\/versions\/([^/]+)$/);
     if (method === "GET" && profileVersionMatch) {
+      if (!requireServiceAccount(req, res, serviceAccountOptions)) return;
       const version = await store.getProfileVersion(
         profileVersionMatch[1] as ProfileId,
         profileVersionMatch[2]! as import("@diy-agent/domain").ProfileVersionId,
@@ -273,6 +290,7 @@ export function createControlPlaneServer(
 
     const profileSyncMatch = path.match(/^\/tenants\/([^/]+)\/profile-sync$/);
     if (method === "GET" && profileSyncMatch) {
+      if (!requireServiceAccount(req, res, serviceAccountOptions)) return;
       const tenantId = profileSyncMatch[1] as TenantId;
       const tenant = await store.getTenant(tenantId);
       if (!tenant) return json(res, 404, { error: "tenant_not_found" });
@@ -333,6 +351,7 @@ export function createControlPlaneServer(
     }
 
     if (method === "POST" && path === "/traces") {
+      if (!requireServiceAccount(req, res, serviceAccountOptions)) return;
       const body = await readBody(req);
       if (!body.profileId || !body.profileVersionId || body.latencyMs === undefined) {
         return json(res, 400, { error: "missing_fields" });
@@ -365,6 +384,105 @@ export function createControlPlaneServer(
       return json(res, 201, trace);
     }
 
+    if (method === "POST" && path === "/marketplace/skills") {
+      if (!requirePlatformAdmin(req, res, platformAdminKey)) return;
+      const body = await readBody(req);
+      if (!body.slug || !body.name || !body.contentHash) {
+        return json(res, 400, { error: "missing_fields" });
+      }
+      try {
+        const skill = await store.publishMarketplaceSkill({
+          slug: body.slug as string,
+          name: body.name as string,
+          description: body.description as string | undefined,
+          contentHash: body.contentHash as string,
+          version: body.version as string | undefined,
+        });
+        return json(res, 201, skill);
+      } catch (err) {
+        if (err instanceof Error && err.message === "marketplace_skill_not_found") {
+          return json(res, 404, { error: "marketplace_skill_not_found" });
+        }
+        throw err;
+      }
+    }
+
+    if (method === "GET" && path === "/marketplace/skills") {
+      const skills = await store.listMarketplaceSkills();
+      return json(res, 200, { skills });
+    }
+
+    const marketplaceSkillMatch = path.match(/^\/marketplace\/skills\/([^/]+)$/);
+    if (method === "GET" && marketplaceSkillMatch) {
+      const skill = await store.getMarketplaceSkill(decodeURIComponent(marketplaceSkillMatch[1]!));
+      if (!skill) return json(res, 404, { error: "marketplace_skill_not_found" });
+      return json(res, 200, skill);
+    }
+
+    if (method === "POST" && path === "/marketplace/subscriptions") {
+      const body = await readBody(req);
+      if (!body.tenantId || !body.marketplaceSkillId) {
+        return json(res, 400, { error: "missing_fields" });
+      }
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        body.tenantId as TenantId,
+      );
+      if (!auth) return;
+      try {
+        const subscription = await store.subscribeMarketplaceSkill(
+          body.tenantId as TenantId,
+          body.marketplaceSkillId as string,
+        );
+        return json(res, 201, subscription);
+      } catch (err) {
+        if (err instanceof Error && err.message === "marketplace_skill_not_found") {
+          return json(res, 404, { error: "marketplace_skill_not_found" });
+        }
+        throw err;
+      }
+    }
+
+    if (method === "GET" && path === "/marketplace/subscriptions") {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const tenantId = url.searchParams.get("tenantId");
+      if (!tenantId) return json(res, 400, { error: "missing_tenant_id" });
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        tenantId as TenantId,
+      );
+      if (!auth) return;
+      const subscriptions = await store.listMarketplaceSubscriptions(tenantId as TenantId);
+      return json(res, 200, { subscriptions });
+    }
+
+    const marketplaceUnsubMatch = path.match(/^\/marketplace\/subscriptions\/([^/]+)$/);
+    if (method === "DELETE" && marketplaceUnsubMatch) {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const tenantId = url.searchParams.get("tenantId");
+      if (!tenantId) return json(res, 400, { error: "missing_tenant_id" });
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        tenantId as TenantId,
+      );
+      if (!auth) return;
+      const removed = await store.unsubscribeMarketplaceSkill(
+        tenantId as TenantId,
+        decodeURIComponent(marketplaceUnsubMatch[1]!),
+      );
+      if (!removed) return json(res, 404, { error: "subscription_not_found" });
+      return json(res, 200, { removed: true });
+    }
+
     if (method === "POST" && path === "/skills") {
       const body = await readBody(req);
       if (!body.tenantId || !body.name || !body.contentHash) {
@@ -381,7 +499,7 @@ export function createControlPlaneServer(
     }
 
     if (method === "GET" && path.startsWith("/skills")) {
-      const url = new URL(path, "http://local");
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const tenantId = url.searchParams.get("tenantId");
       if (!tenantId) return json(res, 400, { error: "missing_tenant_id" });
       const skills = await store.listSkills(
@@ -430,7 +548,7 @@ export function createControlPlaneServer(
     }
 
     if (method === "GET" && path.startsWith("/mcp/catalog")) {
-      const url = new URL(path, "http://local");
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const tenantId = url.searchParams.get("tenantId");
       if (!tenantId) return json(res, 400, { error: "missing_tenant_id" });
       const catalog = await store.listMcp(tenantId as import("@diy-agent/domain").Tenant["id"]);
@@ -570,6 +688,7 @@ export function createControlPlaneServer(
           trigger: "manual",
           target: body.target as import("@diy-agent/domain").EvolutionRun["target"] | undefined,
           tier: body.tier as GovernanceTier | undefined,
+          skillId: body.skillId as string | undefined,
         });
         if (!run) return json(res, 400, { error: "invalid_profile" });
         const profile = await store.getProfile(body.profileId as ProfileId);
@@ -601,6 +720,12 @@ export function createControlPlaneServer(
       } catch (err) {
         if (err instanceof Error && err.message === "evolution_tier_forbidden") {
           return json(res, 403, { error: "evolution_tier_forbidden" });
+        }
+        if (err instanceof Error && err.message === "evolution_skill_not_mutable") {
+          return json(res, 403, { error: "evolution_skill_not_mutable" });
+        }
+        if (err instanceof Error && err.message === "evolution_skill_id_required") {
+          return json(res, 400, { error: "evolution_skill_id_required" });
         }
         if (err instanceof Error && err.message.startsWith("evolution_http_")) {
           return json(res, 502, { error: "evolution_service_unavailable" });

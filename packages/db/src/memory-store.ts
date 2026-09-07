@@ -2,6 +2,7 @@ import {
   DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
   SESSION_TOKEN_TTL_MS,
   isTraceExpired,
+  isL1EvolutionSkillTargetAllowed,
   resolveModelRoute,
   type AgentProfile,
   type AgentProfileVersion,
@@ -13,6 +14,9 @@ import {
   type ProfileSyncEntry,
   type ProfileId,
   type SkillCatalogEntry,
+  type MarketplaceSkill,
+  type MarketplaceSubscription,
+  type SkillEvolutionTarget,
   type Tenant,
   type TenantGateway,
   type WebhookRegistration,
@@ -27,6 +31,7 @@ import type {
   CreateTenantInput,
   CreateWorkspaceInput,
   EvalTraceRecord,
+  PublishMarketplaceSkillInput,
   QuotaCheckResult,
   SessionCreateResult,
   TriggerEvolutionSignalInput,
@@ -50,6 +55,8 @@ export class MemoryStore implements ControlPlaneStore {
   protected goldenTasks = new Map<string, EvalTask>();
   protected traces = new Map<string, EvalTraceRecord>();
   protected skills = new Map<string, SkillCatalogEntry>();
+  protected marketplaceSkills = new Map<string, MarketplaceSkill>();
+  protected marketplaceSubscriptions = new Map<string, MarketplaceSubscription>();
   protected mcpCatalog = new Map<string, McpCatalogEntry>();
   protected credentialRefs = new Map<string, CredentialRefRecord>();
   protected auditLog: AuditEvent[] = [];
@@ -315,11 +322,101 @@ export class MemoryStore implements ControlPlaneStore {
     tenantId: Tenant["id"],
     workspaceId?: import("@diy-agent/domain").Workspace["id"],
   ): Promise<SkillCatalogEntry[]> {
-    return [...this.skills.values()].filter(
+    const catalog = [...this.skills.values()].filter(
       (s) =>
         s.tenantId === tenantId &&
         (workspaceId === undefined || s.workspaceId === undefined || s.workspaceId === workspaceId),
     );
+    const subscribed = [...this.marketplaceSubscriptions.values()]
+      .filter((sub) => sub.tenantId === tenantId)
+      .map((sub) => this.marketplaceSkills.get(sub.marketplaceSkillId))
+      .filter((skill): skill is MarketplaceSkill => skill !== undefined)
+      .map(
+        (skill): SkillCatalogEntry => ({
+          id: skill.id,
+          tenantId,
+          name: skill.name,
+          contentHash: skill.contentHash,
+          source: "marketplace",
+          marketplaceSkillId: skill.id,
+          createdAt: skill.publishedAt,
+        }),
+      );
+    return [...catalog, ...subscribed];
+  }
+
+  async resolveSkillEvolutionTarget(
+    tenantId: Tenant["id"],
+    workspaceId: WorkspaceId,
+    skillId: string,
+  ): Promise<SkillEvolutionTarget | null> {
+    const catalogSkill = this.skills.get(skillId);
+    if (catalogSkill && catalogSkill.tenantId === tenantId) {
+      return { source: catalogSkill.source, workspaceId: catalogSkill.workspaceId };
+    }
+    const marketplaceSkill = this.marketplaceSkills.get(skillId);
+    if (marketplaceSkill) {
+      const key = `${tenantId}:${skillId}`;
+      if (this.marketplaceSubscriptions.has(key)) {
+        return { source: "marketplace" };
+      }
+    }
+    return null;
+  }
+
+  async publishMarketplaceSkill(input: PublishMarketplaceSkillInput): Promise<MarketplaceSkill> {
+    const skill: MarketplaceSkill = {
+      id: crypto.randomUUID(),
+      slug: input.slug,
+      name: input.name,
+      description: input.description,
+      contentHash: input.contentHash,
+      version: input.version ?? "1.0.0",
+      publishedAt: new Date(),
+    };
+    this.marketplaceSkills.set(skill.id, skill);
+    return skill;
+  }
+
+  async listMarketplaceSkills(): Promise<MarketplaceSkill[]> {
+    return [...this.marketplaceSkills.values()].sort(
+      (a, b) => b.publishedAt.getTime() - a.publishedAt.getTime(),
+    );
+  }
+
+  async getMarketplaceSkill(id: string): Promise<MarketplaceSkill | null> {
+    return this.marketplaceSkills.get(id) ?? null;
+  }
+
+  async subscribeMarketplaceSkill(
+    tenantId: Tenant["id"],
+    marketplaceSkillId: string,
+  ): Promise<MarketplaceSubscription> {
+    const skill = this.marketplaceSkills.get(marketplaceSkillId);
+    if (!skill) throw new Error("marketplace_skill_not_found");
+    const subscription: MarketplaceSubscription = {
+      tenantId,
+      marketplaceSkillId,
+      enabledAt: new Date(),
+    };
+    this.marketplaceSubscriptions.set(`${tenantId}:${marketplaceSkillId}`, subscription);
+    await this.appendAudit({
+      tenantId,
+      action: "marketplace.skill_subscribed",
+      metadata: { marketplaceSkillId, slug: skill.slug },
+    });
+    return subscription;
+  }
+
+  async unsubscribeMarketplaceSkill(
+    tenantId: Tenant["id"],
+    marketplaceSkillId: string,
+  ): Promise<boolean> {
+    return this.marketplaceSubscriptions.delete(`${tenantId}:${marketplaceSkillId}`);
+  }
+
+  async listMarketplaceSubscriptions(tenantId: Tenant["id"]): Promise<MarketplaceSubscription[]> {
+    return [...this.marketplaceSubscriptions.values()].filter((sub) => sub.tenantId === tenantId);
   }
 
   async registerMcp(entry: Omit<McpCatalogEntry, "createdAt">): Promise<McpCatalogEntry> {
@@ -429,13 +526,29 @@ export class MemoryStore implements ControlPlaneStore {
     const tier = input.tier ?? profile.governanceTier;
     if (tier === "L3") throw new Error("evolution_tier_forbidden");
 
+    let target = input.target ?? "skill";
+    if (target === "skill" && tier === "L1") {
+      if (!input.skillId) {
+        target = "mcp_description";
+      } else {
+        const skillTarget = await this.resolveSkillEvolutionTarget(
+          input.tenantId,
+          profile.workspaceId,
+          input.skillId,
+        );
+        if (!skillTarget || !isL1EvolutionSkillTargetAllowed(skillTarget)) {
+          throw new Error("evolution_skill_not_mutable");
+        }
+      }
+    }
+
     const run: EvolutionRun = {
       id: crypto.randomUUID(),
       profileId: profile.id,
       baseVersionId,
       tier,
       trigger: input.trigger,
-      target: input.target ?? "skill",
+      target,
       status: tier === "L2" ? "awaiting_review" : "running",
       createdAt: new Date(),
     };
@@ -462,6 +575,7 @@ export class MemoryStore implements ControlPlaneStore {
       tenantId: input.tenantId,
       trigger: "signal",
       tier: profile.governanceTier,
+      target: "mcp_description",
     });
     return run!;
   }
