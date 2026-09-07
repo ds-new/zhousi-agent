@@ -19,6 +19,11 @@ import {
   validateGoldenTaskCount,
 } from "./evolution-client.js";
 import { dispatchWebhooks, type WebhookFetch } from "./webhook-dispatcher.js";
+import {
+  requireAuth,
+  requireWorkspacePermission,
+  type AuthMode,
+} from "./auth-middleware.js";
 
 export interface ControlPlaneServer {
   server: ReturnType<typeof createServer>;
@@ -34,6 +39,7 @@ export interface CreateControlPlaneOptions {
   evolutionInvoker?: typeof invokeEvolutionService;
   webhookFetch?: WebhookFetch;
   mcpKbSearchClient?: McpKbSearchClient;
+  authMode?: AuthMode;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -72,6 +78,7 @@ export function createControlPlaneServer(
   const storage = options.storage ?? "memory";
   const evolve = options.evolutionInvoker ?? invokeEvolutionService;
   const webhookFetch = options.webhookFetch ?? globalThis.fetch.bind(globalThis);
+  const authOptions = { mode: options.authMode ?? "none" as AuthMode };
   const kbServices = new Map<string, HybridKbService>();
 
   async function fireWebhooks(
@@ -138,9 +145,18 @@ export function createControlPlaneServer(
     if (method === "POST" && path === "/workspaces") {
       const body = await readBody(req);
       if (!body.tenantId) return json(res, 400, { error: "missing_tenant_id" });
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        body.tenantId as TenantId,
+      );
+      if (!auth) return;
       const ws = await store.createWorkspace({
         tenantId: body.tenantId as import("@diy-agent/domain").Tenant["id"],
         name: body.name as string | undefined,
+        creatorUserId: body.creatorUserId as string | undefined,
       });
       if (!ws) return json(res, 400, { error: "invalid_tenant" });
       return json(res, 201, ws);
@@ -151,6 +167,23 @@ export function createControlPlaneServer(
       if (!body.workspaceId || !body.tenantId) {
         return json(res, 400, { error: "missing_workspace_or_tenant" });
       }
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        body.tenantId as TenantId,
+      );
+      if (!auth) return;
+      const allowed = await requireWorkspacePermission(
+        store,
+        res,
+        auth,
+        authOptions,
+        body.workspaceId as import("@diy-agent/domain").WorkspaceId,
+        "profile.create",
+      );
+      if (!allowed) return;
       try {
         const result = await store.createProfile({
           workspaceId: body.workspaceId as import("@diy-agent/domain").Workspace["id"],
@@ -431,6 +464,77 @@ export function createControlPlaneServer(
       return json(res, 201, hook);
     }
 
+    if (method === "POST" && path === "/api-keys") {
+      const body = await readBody(req);
+      if (!body.tenantId || !body.name) {
+        return json(res, 400, { error: "missing_fields" });
+      }
+      const created = await store.createApiKey(
+        body.tenantId as TenantId,
+        body.name as string,
+      );
+      return json(res, 201, created);
+    }
+
+    if (method === "POST" && path === "/workspace-members") {
+      const body = await readBody(req);
+      if (!body.tenantId || !body.workspaceId || !body.userId || !body.role) {
+        return json(res, 400, { error: "missing_fields" });
+      }
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        body.tenantId as TenantId,
+      );
+      if (!auth) return;
+      const member = await store.addWorkspaceMember(
+        body.workspaceId as import("@diy-agent/domain").WorkspaceId,
+        body.userId as string,
+        body.role as import("@diy-agent/domain").WorkspaceRole,
+      );
+      return json(res, 201, member);
+    }
+
+    const policyMatch = path.match(/^\/workspaces\/([^/]+)\/policy$/);
+    if (policyMatch) {
+      const workspaceId = policyMatch[1] as import("@diy-agent/domain").WorkspaceId;
+      if (method === "GET") {
+        const policy = await store.getWorkspacePolicy(workspaceId);
+        if (!policy) return json(res, 404, { error: "policy_not_found" });
+        return json(res, 200, policy);
+      }
+      if (method === "PUT") {
+        const body = await readBody(req);
+        if (!body.tenantId || !body.rules) {
+          return json(res, 400, { error: "missing_fields" });
+        }
+        const auth = await requireAuth(
+          req,
+          res,
+          store,
+          authOptions,
+          body.tenantId as TenantId,
+        );
+        if (!auth) return;
+        const allowed = await requireWorkspacePermission(
+          store,
+          res,
+          auth,
+          authOptions,
+          workspaceId,
+          "policy.write",
+        );
+        if (!allowed) return;
+        const policy = await store.setWorkspacePolicy({
+          workspaceId,
+          rules: body.rules as import("@diy-agent/domain").AccessPolicy["rules"],
+        });
+        return json(res, 200, policy);
+      }
+    }
+
     if (method === "GET" && path.startsWith("/audit")) {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const tenantId = url.searchParams.get("tenantId");
@@ -547,6 +651,67 @@ export function createControlPlaneServer(
     if (method === "GET" && evoMatch) {
       const run = await store.getEvolutionRun(evoMatch[1]!);
       if (!run) return json(res, 404, { error: "not_found" });
+      return json(res, 200, run);
+    }
+
+    const evoApproveMatch = path.match(/^\/evolution\/runs\/([^/]+)\/approve$/);
+    if (method === "POST" && evoApproveMatch) {
+      const body = await readBody(req);
+      if (!body.tenantId) return json(res, 400, { error: "missing_tenant_id" });
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        body.tenantId as TenantId,
+      );
+      if (!auth) return;
+      const pendingRun = await store.getEvolutionRun(evoApproveMatch[1]!);
+      const profile = pendingRun
+        ? await store.getProfile(pendingRun.profileId)
+        : null;
+      if (profile) {
+        const allowed = await requireWorkspacePermission(
+          store,
+          res,
+          auth,
+          authOptions,
+          profile.workspaceId,
+          "evolution.approve",
+        );
+        if (!allowed) return;
+      }
+      const run = await store.approveEvolutionRun({
+        runId: evoApproveMatch[1]!,
+        tenantId: body.tenantId as TenantId,
+        reviewer: (body.reviewer as string) ?? auth.subject,
+        candidateVersionId: body.candidateVersionId as
+          | import("@diy-agent/domain").ProfileVersionId
+          | undefined,
+      });
+      if (!run) return json(res, 404, { error: "run_not_awaiting_review" });
+      return json(res, 200, run);
+    }
+
+    const evoRejectMatch = path.match(/^\/evolution\/runs\/([^/]+)\/reject$/);
+    if (method === "POST" && evoRejectMatch) {
+      const body = await readBody(req);
+      if (!body.tenantId) return json(res, 400, { error: "missing_tenant_id" });
+      const auth = await requireAuth(
+        req,
+        res,
+        store,
+        authOptions,
+        body.tenantId as TenantId,
+      );
+      if (!auth) return;
+      const run = await store.rejectEvolutionRun({
+        runId: evoRejectMatch[1]!,
+        tenantId: body.tenantId as TenantId,
+        reviewer: (body.reviewer as string) ?? auth!.subject,
+        reason: body.reason as string | undefined,
+      });
+      if (!run) return json(res, 404, { error: "run_not_awaiting_review" });
       return json(res, 200, run);
     }
 

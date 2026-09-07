@@ -50,6 +50,23 @@ paths:
   /webhooks:
     post:
       summary: Register tenant webhook endpoint
+  /api-keys:
+    post:
+      summary: Create Tenant Admin API key (diy_sk_*)
+  /workspace-members:
+    post:
+      summary: Assign Workspace RBAC role (admin/builder/user)
+  /workspaces/{workspaceId}/policy:
+    get:
+      summary: Get workspace access policy
+    put:
+      summary: Update workspace access policy
+  /evolution/runs/{runId}/approve:
+    post:
+      summary: Approve L2 evolution candidate
+  /evolution/runs/{runId}/reject:
+    post:
+      summary: Reject L2 evolution candidate
   /evolution/runs:
     post:
       summary: Start Evolution Run

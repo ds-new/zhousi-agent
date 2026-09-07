@@ -21,6 +21,11 @@ export interface OrchestrationResult {
   plan: OrchestrationPlan;
   finalOutput: string;
   handoffs: Array<{ from: ProfileId | string; to: ProfileId | string; latencyMs: number }>;
+  metrics: {
+    handoffCount: number;
+    avgHandoffLatencyMs: number;
+    workerCount: number;
+  };
 }
 
 export interface Orchestrator {
@@ -56,14 +61,20 @@ export class SupervisorOrchestrator implements Orchestrator {
       task.status = "done";
       outputs.push(task.output);
     }
-    return { plan, finalOutput: outputs.join("\n\n"), handoffs };
+    return {
+      plan,
+      finalOutput: outputs.join("\n\n"),
+      handoffs,
+      metrics: buildMetrics(plan, handoffs),
+    };
   }
 }
 
 export class PipelineOrchestrator implements Orchestrator {
   plan(userGoal: string, config: OrchestrationConfig, supervisorId: ProfileId): OrchestrationPlan {
     const workers = config.workerProfileIds ?? [];
-    const stages = ["retrieve", "analyze", "respond"];
+    const defaultStages = ["retrieve", "analyze", "respond"];
+    const stages = workers.length ? defaultStages.slice(0, workers.length) : defaultStages;
     const tasks = stages.map((stage, i) => ({
       workerProfileId: workers[i] ?? (`pipeline-${stage}` as ProfileId),
       instruction: `${stage}: ${userGoal}`,
@@ -86,7 +97,7 @@ export class PipelineOrchestrator implements Orchestrator {
       handoffs[handoffs.length - 1]!.latencyMs = Date.now() - start;
       prev = task.workerProfileId;
     }
-    return { plan, finalOutput: context, handoffs };
+    return { plan, finalOutput: context, handoffs, metrics: buildMetrics(plan, handoffs) };
   }
 }
 
@@ -118,7 +129,7 @@ export class BlackboardOrchestrator implements Orchestrator {
         });
       }),
     );
-    return { plan, finalOutput: board.join("\n---\n"), handoffs };
+    return { plan, finalOutput: board.join("\n---\n"), handoffs, metrics: buildMetrics(plan, handoffs) };
   }
 }
 
@@ -137,4 +148,20 @@ export function createOrchestrator(topology: OrchestrationTopology): Orchestrato
 function decomposeGoal(goal: string, count: number): string[] {
   if (count <= 1) return [goal];
   return Array.from({ length: count }, (_, i) => `Subtask ${i + 1}/${count}: ${goal}`);
+}
+
+function buildMetrics(
+  plan: OrchestrationPlan,
+  handoffs: OrchestrationResult["handoffs"],
+): OrchestrationResult["metrics"] {
+  const handoffCount = handoffs.length;
+  const avgHandoffLatencyMs =
+    handoffCount === 0
+      ? 0
+      : handoffs.reduce((sum, h) => sum + h.latencyMs, 0) / handoffCount;
+  return {
+    handoffCount,
+    avgHandoffLatencyMs,
+    workerCount: plan.tasks.length,
+  };
 }

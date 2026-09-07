@@ -12,6 +12,8 @@ export type {
   CreateSessionInput,
   CreateTenantInput,
   CreateWorkspaceInput,
+  ApproveEvolutionInput,
+  RejectEvolutionInput,
   EvalTraceRecord,
   QuotaCheckResult,
   SessionCreateResult,

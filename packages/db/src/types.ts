@@ -1,4 +1,5 @@
 import type {
+  AccessPolicy,
   AgentProfile,
   AgentProfileVersion,
   AuditEvent,
@@ -13,7 +14,10 @@ import type {
   TenantGateway,
   WebhookRegistration,
   Workspace,
+  WorkspaceId,
+  WorkspaceRole,
 } from "@diy-agent/domain";
+import type { ApiKeyRecord, WorkspaceMemberRecord } from "@diy-agent/auth";
 
 export interface CreateTenantInput {
   name: string;
@@ -25,6 +29,21 @@ export interface CreateTenantInput {
 export interface CreateWorkspaceInput {
   tenantId: Tenant["id"];
   name?: string;
+  creatorUserId?: string;
+}
+
+export interface ApproveEvolutionInput {
+  runId: string;
+  tenantId: Tenant["id"];
+  reviewer: string;
+  candidateVersionId?: AgentProfileVersion["id"];
+}
+
+export interface RejectEvolutionInput {
+  runId: string;
+  tenantId: Tenant["id"];
+  reviewer: string;
+  reason?: string;
 }
 
 export interface CreateProfileInput {
@@ -126,6 +145,22 @@ export interface ControlPlaneStore {
   triggerEvolutionSignal(
     input: TriggerEvolutionSignalInput,
   ): Promise<EvolutionRun | { skipped: true; reason: string }>;
+  approveEvolutionRun(input: ApproveEvolutionInput): Promise<EvolutionRun | null>;
+  rejectEvolutionRun(input: RejectEvolutionInput): Promise<EvolutionRun | null>;
+  createApiKey(tenantId: Tenant["id"], name: string): Promise<{ key: string; record: ApiKeyRecord }>;
+  listApiKeys(tenantId: Tenant["id"]): Promise<ApiKeyRecord[]>;
+  listAllApiKeys(): Promise<ApiKeyRecord[]>;
+  addWorkspaceMember(
+    workspaceId: WorkspaceId,
+    userId: string,
+    role: WorkspaceRole,
+  ): Promise<WorkspaceMemberRecord>;
+  getWorkspaceMember(
+    workspaceId: WorkspaceId,
+    userId: string,
+  ): Promise<WorkspaceMemberRecord | null>;
+  setWorkspacePolicy(policy: AccessPolicy): Promise<AccessPolicy>;
+  getWorkspacePolicy(workspaceId: WorkspaceId): Promise<AccessPolicy | null>;
   close?(): Promise<void>;
 }
 

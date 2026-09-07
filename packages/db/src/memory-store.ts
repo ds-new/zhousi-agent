@@ -20,6 +20,8 @@ import {
 import type {
   ControlPlaneStore,
   CreateEvolutionRunInput,
+  ApproveEvolutionInput,
+  RejectEvolutionInput,
   CreateProfileInput,
   CreateSessionInput,
   CreateTenantInput,
@@ -30,6 +32,8 @@ import type {
   TriggerEvolutionSignalInput,
 } from "./types.js";
 import { defaultGateway } from "./types.js";
+import { generateApiKey, type ApiKeyRecord, type WorkspaceMemberRecord } from "@diy-agent/auth";
+import type { AccessPolicy, WorkspaceId, WorkspaceRole } from "@diy-agent/domain";
 
 interface RateWindow {
   count: number;
@@ -50,6 +54,9 @@ export class MemoryStore implements ControlPlaneStore {
   protected credentialRefs = new Map<string, CredentialRefRecord>();
   protected auditLog: AuditEvent[] = [];
   protected quotaWarningsDispatched = new Set<string>();
+  protected apiKeys = new Map<string, ApiKeyRecord>();
+  protected workspaceMembers = new Map<string, WorkspaceMemberRecord>();
+  protected workspacePolicies = new Map<string, AccessPolicy>();
   protected webhooks = new Map<string, WebhookRegistration>();
   protected sessionTokens = new Map<string, { workspaceId: string; expiresAt: number }>();
   protected tokenUsageByTenant = new Map<string, { day: string; tokens: number }>();
@@ -128,6 +135,9 @@ export class MemoryStore implements ControlPlaneStore {
       createdAt: new Date(),
     };
     this.workspaces.set(id, ws);
+    if (input.creatorUserId) {
+      await this.addWorkspaceMember(id, input.creatorUserId, "admin");
+    }
     return ws;
   }
 
@@ -454,6 +464,114 @@ export class MemoryStore implements ControlPlaneStore {
       tier: profile.governanceTier,
     });
     return run!;
+  }
+
+  async approveEvolutionRun(input: ApproveEvolutionInput): Promise<EvolutionRun | null> {
+    const run = this.evolutionRuns.get(input.runId);
+    if (!run || run.status !== "awaiting_review") return null;
+    const profile = this.profiles.get(run.profileId);
+    if (!profile) return null;
+    const ws = this.workspaces.get(profile.workspaceId);
+    if (!ws || ws.tenantId !== input.tenantId) return null;
+
+    const baseVersion = this.profileVersions.get(run.baseVersionId);
+    if (!baseVersion) return null;
+
+    const candidateId =
+      input.candidateVersionId ??
+      run.candidateVersionId ??
+      (crypto.randomUUID() as AgentProfileVersion["id"]);
+
+    if (!this.profileVersions.has(candidateId)) {
+      this.profileVersions.set(candidateId, {
+        id: candidateId,
+        profileId: profile.id,
+        version: baseVersion.version + 1,
+        snapshot: structuredClone(baseVersion.snapshot),
+        createdAt: new Date(),
+        approvalStatus: "approved",
+      });
+    }
+
+    run.candidateVersionId = candidateId;
+    run.status = "completed";
+    await this.appendAudit({
+      tenantId: input.tenantId,
+      workspaceId: profile.workspaceId,
+      action: "evolution.approved",
+      actor: input.reviewer,
+      metadata: { runId: run.id, candidateVersionId: candidateId },
+    });
+    return run;
+  }
+
+  async rejectEvolutionRun(input: RejectEvolutionInput): Promise<EvolutionRun | null> {
+    const run = this.evolutionRuns.get(input.runId);
+    if (!run || run.status !== "awaiting_review") return null;
+    const profile = this.profiles.get(run.profileId);
+    if (!profile) return null;
+    const ws = this.workspaces.get(profile.workspaceId);
+    if (!ws || ws.tenantId !== input.tenantId) return null;
+
+    run.status = "rejected";
+    await this.appendAudit({
+      tenantId: input.tenantId,
+      workspaceId: profile.workspaceId,
+      action: "evolution.rejected",
+      actor: input.reviewer,
+      metadata: { runId: run.id, reason: input.reason },
+    });
+    return run;
+  }
+
+  async createApiKey(
+    tenantId: Tenant["id"],
+    name: string,
+  ): Promise<{ key: string; record: ApiKeyRecord }> {
+    const generated = generateApiKey(tenantId, name);
+    this.apiKeys.set(generated.record.id, generated.record);
+    return generated;
+  }
+
+  async listApiKeys(tenantId: Tenant["id"]): Promise<ApiKeyRecord[]> {
+    return [...this.apiKeys.values()].filter((key) => key.tenantId === tenantId);
+  }
+
+  async listAllApiKeys(): Promise<ApiKeyRecord[]> {
+    return [...this.apiKeys.values()];
+  }
+
+  async addWorkspaceMember(
+    workspaceId: WorkspaceId,
+    userId: string,
+    role: WorkspaceRole,
+  ): Promise<WorkspaceMemberRecord> {
+    const id = crypto.randomUUID();
+    const member: WorkspaceMemberRecord = {
+      id,
+      workspaceId,
+      userId,
+      role,
+      createdAt: new Date(),
+    };
+    this.workspaceMembers.set(`${workspaceId}:${userId}`, member);
+    return member;
+  }
+
+  async getWorkspaceMember(
+    workspaceId: WorkspaceId,
+    userId: string,
+  ): Promise<WorkspaceMemberRecord | null> {
+    return this.workspaceMembers.get(`${workspaceId}:${userId}`) ?? null;
+  }
+
+  async setWorkspacePolicy(policy: AccessPolicy): Promise<AccessPolicy> {
+    this.workspacePolicies.set(policy.workspaceId, policy);
+    return policy;
+  }
+
+  async getWorkspacePolicy(workspaceId: WorkspaceId): Promise<AccessPolicy | null> {
+    return this.workspacePolicies.get(workspaceId) ?? null;
   }
 
   protected checkRateLimit(tenantId: string, rpm: number): QuotaCheckResult {

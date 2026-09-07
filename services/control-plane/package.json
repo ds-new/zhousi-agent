@@ -15,6 +15,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@diy-agent/auth": "*",
     "@diy-agent/db": "*",
     "@diy-agent/domain": "*",
     "@diy-agent/eval-harness": "*",

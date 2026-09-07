@@ -7,6 +7,7 @@ export type ProfileId = string & { readonly __brand: "ProfileId" };
 export type ProfileVersionId = string & { readonly __brand: "ProfileVersionId" };
 
 export type GovernanceTier = "L0" | "L1" | "L2" | "L3";
+export type WorkspaceRole = "admin" | "builder" | "user";
 export type IsolationMode = "schema" | "dedicated";
 export type McpPoolScope = "tenant" | "workspace" | "session";
 export type SkillSource = "marketplace" | "private";
@@ -32,6 +33,11 @@ export interface TenantGateway {
   fallbackProvider?: string;
   maxTokensPerDay?: number;
   maxWarmMcpConnections?: number;
+  oidc?: {
+    enabled: boolean;
+    issuer?: string;
+    audience?: string;
+  };
 }
 
 export interface ProfilePinGate {
@@ -197,7 +203,7 @@ export interface EvolutionRun {
   tier: GovernanceTier;
   trigger: EvolutionTrigger;
   target: "skill" | "prompt" | "mcp_description";
-  status: "running" | "completed" | "failed" | "awaiting_review";
+  status: "running" | "completed" | "failed" | "awaiting_review" | "rejected";
   evalScoreDelta?: number;
   createdAt: Date;
 }
