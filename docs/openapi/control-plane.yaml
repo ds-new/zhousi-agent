@@ -39,6 +39,14 @@ paths:
   /kb/search:
     post:
       summary: Hybrid KB search (internal vector + external MCP)
+  /audit:
+    get:
+      summary: List tenant audit events
+    post:
+      summary: Append audit event (e.g. policy.ask_resolved from Data Plane)
+  /webhooks:
+    post:
+      summary: Register tenant webhook endpoint
   /evolution/runs:
     post:
       summary: Start Evolution Run

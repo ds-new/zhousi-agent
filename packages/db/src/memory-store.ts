@@ -48,6 +48,7 @@ export class MemoryStore implements ControlPlaneStore {
   protected mcpCatalog = new Map<string, McpCatalogEntry>();
   protected credentialRefs = new Map<string, CredentialRefRecord>();
   protected auditLog: AuditEvent[] = [];
+  protected quotaWarningsDispatched = new Set<string>();
   protected webhooks = new Map<string, WebhookRegistration>();
   protected sessionTokens = new Map<string, { workspaceId: string; expiresAt: number }>();
   protected tokenUsageByTenant = new Map<string, { day: string; tokens: number }>();
@@ -338,6 +339,12 @@ export class MemoryStore implements ControlPlaneStore {
       createdAt: new Date(),
     };
     this.credentialRefs.set(ref.id, ref);
+    await this.appendAudit({
+      tenantId: entry.tenantId,
+      action: "vault.credential_rotated",
+      actor: entry.createdBy,
+      metadata: { scope: entry.scope, refId: ref.id },
+    });
     return ref;
   }
 
@@ -351,6 +358,11 @@ export class MemoryStore implements ControlPlaneStore {
     return record;
   }
 
+  async listAuditLog(tenantId: Tenant["id"], limit = 100): Promise<AuditEvent[]> {
+    const events = this.auditLog.filter((entry) => entry.tenantId === tenantId);
+    return events.slice(-limit).reverse();
+  }
+
   async registerWebhook(
     entry: Omit<WebhookRegistration, "id" | "createdAt">,
   ): Promise<WebhookRegistration> {
@@ -361,6 +373,18 @@ export class MemoryStore implements ControlPlaneStore {
     };
     this.webhooks.set(hook.id, hook);
     return hook;
+  }
+
+  async listWebhooks(tenantId: Tenant["id"]): Promise<WebhookRegistration[]> {
+    return [...this.webhooks.values()].filter((hook) => hook.tenantId === tenantId);
+  }
+
+  async consumeQuotaWarningDispatch(tenantId: Tenant["id"]): Promise<boolean> {
+    const day = new Date().toISOString().slice(0, 10);
+    const key = `${tenantId}:${day}`;
+    if (this.quotaWarningsDispatched.has(key)) return false;
+    this.quotaWarningsDispatched.add(key);
+    return true;
   }
 
   async createEvolutionRun(input: CreateEvolutionRunInput): Promise<EvolutionRun | null> {

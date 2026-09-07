@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@diy-agent/domain": "*",
+    "@diy-agent/dsh-mcp-pool-plugin": "*",
     "pg": "^8.13.1"
   },
   "devDependencies": {

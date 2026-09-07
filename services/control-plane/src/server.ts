@@ -2,21 +2,23 @@
  * Control Plane HTTP server — testable factory + route handlers.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { HybridKbService, PostgresKbStore } from "@diy-agent/kb-rag";
+import { HybridKbService, PostgresKbStore, type McpKbSearchClient } from "@diy-agent/kb-rag";
 import { createOrchestrator } from "@diy-agent/orchestrator";
 import {
   MemoryStore,
   PostgresStore,
   createStore,
   type ControlPlaneStore,
+  type QuotaCheckResult,
 } from "@diy-agent/db";
-import type { AgentProfile, GovernanceTier, ProfileId } from "@diy-agent/domain";
+import type { AgentProfile, GovernanceTier, ProfileId, TenantId } from "@diy-agent/domain";
 import {
   invokeEvolutionService,
   scoreProfileTask,
   evaluatePinGate,
   validateGoldenTaskCount,
 } from "./evolution-client.js";
+import { dispatchWebhooks, type WebhookFetch } from "./webhook-dispatcher.js";
 
 export interface ControlPlaneServer {
   server: ReturnType<typeof createServer>;
@@ -30,6 +32,8 @@ export interface CreateControlPlaneOptions {
   port?: number;
   storage?: "memory" | "postgres";
   evolutionInvoker?: typeof invokeEvolutionService;
+  webhookFetch?: WebhookFetch;
+  mcpKbSearchClient?: McpKbSearchClient;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -44,16 +48,21 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
-async function dispatchWebhooks(
+async function maybeDispatchQuotaWarning(
   store: ControlPlaneStore,
   tenantId: string,
-  event: string,
-  payload: Record<string, unknown>,
+  quota: QuotaCheckResult,
+  fetchImpl: WebhookFetch,
 ): Promise<void> {
-  void store;
-  void tenantId;
-  void event;
-  void payload;
+  if (!quota.warning) return;
+  if (!(await store.consumeQuotaWarningDispatch(tenantId as TenantId))) return;
+  await dispatchWebhooks(
+    store,
+    tenantId,
+    "quota.warning",
+    { tokensUsedToday: quota.tokensUsedToday },
+    fetchImpl,
+  );
 }
 
 export function createControlPlaneServer(
@@ -62,7 +71,16 @@ export function createControlPlaneServer(
   const store = options.store ?? new MemoryStore();
   const storage = options.storage ?? "memory";
   const evolve = options.evolutionInvoker ?? invokeEvolutionService;
+  const webhookFetch = options.webhookFetch ?? globalThis.fetch.bind(globalThis);
   const kbServices = new Map<string, HybridKbService>();
+
+  async function fireWebhooks(
+    tenantId: string,
+    event: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    await dispatchWebhooks(store, tenantId, event, payload, webhookFetch);
+  }
 
   async function resolveKbService(profile: AgentProfile): Promise<HybridKbService> {
     let svc = kbServices.get(profile.id);
@@ -72,7 +90,14 @@ export function createControlPlaneServer(
       if (tenant && store instanceof PostgresStore) {
         internalStore = new PostgresKbStore(store.getPool(), tenant.dbSchema);
       }
-      svc = new HybridKbService(profile.kbConfig ?? { internal: { enabled: true } }, internalStore);
+      svc = new HybridKbService(
+        profile.kbConfig ?? { internal: { enabled: true } },
+        internalStore,
+        options.mcpKbSearchClient,
+        tenant
+          ? { tenantId: tenant.id, workspaceId: profile.workspaceId }
+          : { workspaceId: profile.workspaceId },
+      );
       kbServices.set(profile.id, svc);
     }
     return svc;
@@ -188,7 +213,7 @@ export function createControlPlaneServer(
       );
       const gate = evaluatePinGate(results, evalTraces);
       if (!gate.passed) {
-        await dispatchWebhooks(store, body.tenantId as string, "eval.pin_gate_failed", {
+        await fireWebhooks(body.tenantId as string, "eval.pin_gate_failed", {
           profileId,
           reasons: gate.reasons,
         });
@@ -203,7 +228,7 @@ export function createControlPlaneServer(
         action: "profile.pinned",
         metadata: { profileId, versionId },
       });
-      await dispatchWebhooks(store, body.tenantId as string, "profile.pinned", {
+      await fireWebhooks(body.tenantId as string, "profile.pinned", {
         profileId,
         versionId,
       });
@@ -226,6 +251,12 @@ export function createControlPlaneServer(
         tenantId: body.tenantId as import("@diy-agent/domain").Tenant["id"],
       });
       if (!result) return json(res, 400, { error: "invalid_profile" });
+      await maybeDispatchQuotaWarning(
+        store,
+        body.tenantId as string,
+        quota,
+        webhookFetch,
+      );
       return json(res, 201, { ...result, quotaWarning: quota.warning ?? false });
     }
 
@@ -275,9 +306,15 @@ export function createControlPlaneServer(
         void ws;
       }
       if (body.tokensUsed && body.tenantId) {
-        await store.recordTokenUsage(
+        const quota = await store.recordTokenUsage(
           body.tenantId as import("@diy-agent/domain").Tenant["id"],
           body.tokensUsed as number,
+        );
+        await maybeDispatchQuotaWarning(
+          store,
+          body.tenantId as string,
+          quota,
+          webhookFetch,
         );
       }
       return json(res, 201, trace);
@@ -382,6 +419,29 @@ export function createControlPlaneServer(
       return json(res, 201, hook);
     }
 
+    if (method === "GET" && path.startsWith("/audit")) {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const tenantId = url.searchParams.get("tenantId");
+      if (!tenantId) return json(res, 400, { error: "missing_tenant_id" });
+      const events = await store.listAuditLog(tenantId as TenantId);
+      return json(res, 200, { events });
+    }
+
+    if (method === "POST" && path === "/audit") {
+      const body = await readBody(req);
+      if (!body.tenantId || !body.action) {
+        return json(res, 400, { error: "missing_fields" });
+      }
+      const event = await store.appendAudit({
+        tenantId: body.tenantId as TenantId,
+        workspaceId: body.workspaceId as import("@diy-agent/domain").WorkspaceId | undefined,
+        action: body.action as string,
+        actor: body.actor as string | undefined,
+        metadata: body.metadata as Record<string, unknown> | undefined,
+      });
+      return json(res, 201, event);
+    }
+
     if (method === "POST" && path === "/evolution/runs") {
       const body = await readBody(req);
       if (!body.profileId || !body.tenantId) {
@@ -417,7 +477,7 @@ export function createControlPlaneServer(
         run.evalScoreDelta = svc.evalScoreDelta;
         if (svc.requiresReview) run.status = "awaiting_review";
         if (run.status === "awaiting_review") {
-          await dispatchWebhooks(store, body.tenantId as string, "evolution.awaiting_review", {
+          await fireWebhooks(body.tenantId as string, "evolution.awaiting_review", {
             runId: run.id,
           });
         }

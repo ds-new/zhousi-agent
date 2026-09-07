@@ -114,9 +114,12 @@ export interface ControlPlaneStore {
     entry: Omit<CredentialRefRecord, "id" | "createdAt">,
   ): Promise<CredentialRefRecord>;
   appendAudit(event: Omit<AuditEvent, "id" | "createdAt">): Promise<AuditEvent>;
+  listAuditLog(tenantId: Tenant["id"], limit?: number): Promise<AuditEvent[]>;
   registerWebhook(
     entry: Omit<WebhookRegistration, "id" | "createdAt">,
   ): Promise<WebhookRegistration>;
+  listWebhooks(tenantId: Tenant["id"]): Promise<WebhookRegistration[]>;
+  consumeQuotaWarningDispatch(tenantId: Tenant["id"]): Promise<boolean>;
   createEvolutionRun(input: CreateEvolutionRunInput): Promise<EvolutionRun | null>;
   getEvolutionRun(id: string): Promise<EvolutionRun | null>;
   triggerEvolutionSignal(

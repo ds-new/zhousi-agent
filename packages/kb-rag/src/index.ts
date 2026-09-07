@@ -1,27 +1,23 @@
-import type { KnowledgeBaseConfig, McpBinding, WorkspaceId } from "@diy-agent/domain";
+import type { KnowledgeBaseConfig, WorkspaceId } from "@diy-agent/domain";
 import { InternalKbStore } from "./internal-kb-store.js";
+import {
+  ExternalMcpKbConnector,
+  HttpMcpKbSearchClient,
+  type McpKbSearchClient,
+  type McpKbSearchContext,
+} from "./external-mcp-kb-connector.js";
 import type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
 
 export type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
 export { embedText, cosineSimilarity, EMBEDDING_DIMENSIONS } from "./embedding.js";
 export { InternalKbStore, getInternalIndex, resetInternalIndexForTests } from "./internal-kb-store.js";
 export { PostgresKbStore } from "./postgres-kb-store.js";
-
-export class ExternalMcpKbConnector {
-  constructor(private binding: McpBinding) {}
-
-  async search(_query: string): Promise<KbSearchHit[]> {
-    return [
-      {
-        documentId: `ext-${this.binding.serverName}`,
-        title: `${this.binding.serverName} KB`,
-        snippet: `[external MCP: ${this.binding.serverName}]`,
-        score: 0.5,
-        source: "external_mcp",
-      },
-    ];
-  }
-}
+export {
+  ExternalMcpKbConnector,
+  HttpMcpKbSearchClient,
+  type McpKbSearchClient,
+  type McpKbSearchContext,
+} from "./external-mcp-kb-connector.js";
 
 function reciprocalRankFusion(
   lists: KbSearchHit[][],
@@ -52,6 +48,8 @@ export class HybridKbService {
   constructor(
     private config: KnowledgeBaseConfig,
     internalStore?: KbStore,
+    private externalClient?: McpKbSearchClient,
+    private mcpContext: McpKbSearchContext = {},
   ) {
     this.internal = internalStore ?? new InternalKbStore();
   }
@@ -73,7 +71,11 @@ export class HybridKbService {
       lists.push(await this.internal.search(workspaceId, query));
     }
     if (this.config.externalMcp) {
-      const ext = new ExternalMcpKbConnector(this.config.externalMcp);
+      const ext = new ExternalMcpKbConnector(
+        this.config.externalMcp,
+        this.externalClient ?? new HttpMcpKbSearchClient(),
+        { ...this.mcpContext, workspaceId },
+      );
       lists.push(await ext.search(query));
     }
 

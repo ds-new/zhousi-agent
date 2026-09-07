@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import type { ProfileId } from "@diy-agent/domain";
+import type { AuditEvent, ProfileId, TenantId } from "@diy-agent/domain";
 import { isTraceExpired } from "@diy-agent/domain";
 import { MemoryStore } from "./memory-store.js";
 import type { EvalTraceRecord } from "./types.js";
@@ -142,6 +142,61 @@ export class PostgresStore extends MemoryStore {
         this.traces.delete(id);
       }
     }
+  }
+
+  override async appendAudit(event: Omit<AuditEvent, "id" | "createdAt">): Promise<AuditEvent> {
+    const record = await super.appendAudit(event);
+    const tenant = await this.getTenant(event.tenantId);
+    if (tenant) {
+      const schema = quoteIdent(tenant.dbSchema);
+      await this.pool.query(
+        `INSERT INTO ${schema}.audit_log (id, tenant_id, workspace_id, action, actor, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+        [
+          record.id,
+          record.tenantId,
+          record.workspaceId ?? null,
+          record.action,
+          record.actor ?? null,
+          JSON.stringify(record.metadata ?? {}),
+          record.createdAt,
+        ],
+      );
+    }
+    return record;
+  }
+
+  override async listAuditLog(tenantId: TenantId, limit = 100): Promise<AuditEvent[]> {
+    const tenant = await this.getTenant(tenantId);
+    if (tenant) {
+      const schema = quoteIdent(tenant.dbSchema);
+      const result = await this.pool.query<{
+        id: string;
+        tenant_id: string;
+        workspace_id: string | null;
+        action: string;
+        actor: string | null;
+        metadata: Record<string, unknown> | null;
+        created_at: Date;
+      }>(
+        `SELECT id, tenant_id, workspace_id, action, actor, metadata, created_at
+         FROM ${schema}.audit_log
+         WHERE tenant_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [tenantId, limit],
+      );
+      return result.rows.map((row) => ({
+        id: row.id,
+        tenantId: row.tenant_id as TenantId,
+        workspaceId: row.workspace_id as import("@diy-agent/domain").WorkspaceId | undefined,
+        action: row.action,
+        actor: row.actor ?? undefined,
+        metadata: row.metadata ?? undefined,
+        createdAt: row.created_at,
+      }));
+    }
+    return super.listAuditLog(tenantId, limit);
   }
 
   override async close(): Promise<void> {
