@@ -16,6 +16,7 @@ import {
   type ProfileId,
   type ProfileEvalRun,
   type SkillCatalogEntry,
+  type KbDocumentRegistryEntry,
   type MarketplaceSkill,
   type MarketplaceSubscription,
   type SkillEvolutionTarget,
@@ -67,6 +68,7 @@ export class MemoryStore implements ControlPlaneStore {
   protected workspaceMembers = new Map<string, WorkspaceMemberRecord>();
   protected workspacePolicies = new Map<string, AccessPolicy>();
   protected profileEvalRuns = new Map<string, ProfileEvalRun>();
+  protected kbDocumentRegistry = new Map<string, KbDocumentRegistryEntry>();
   protected webhooks = new Map<string, WebhookRegistration>();
   protected sessionTokens = new Map<string, { workspaceId: string; expiresAt: number }>();
   protected tokenUsageByTenant = new Map<string, { day: string; tokens: number }>();
@@ -709,6 +711,23 @@ export class MemoryStore implements ControlPlaneStore {
       .filter((run) => run.profileId === profileId)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .slice(0, limit);
+  }
+
+  async registerKbDocument(
+    entry: Omit<KbDocumentRegistryEntry, "createdAt">,
+  ): Promise<KbDocumentRegistryEntry> {
+    const record: KbDocumentRegistryEntry = {
+      ...entry,
+      createdAt: new Date(),
+    };
+    this.kbDocumentRegistry.set(record.id, record);
+    return record;
+  }
+
+  async listKbDocuments(profileId: ProfileId): Promise<KbDocumentRegistryEntry[]> {
+    return [...this.kbDocumentRegistry.values()]
+      .filter((doc) => doc.profileId === profileId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
 
   protected checkRateLimit(tenantId: string, rpm: number): QuotaCheckResult {

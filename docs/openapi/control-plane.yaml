@@ -44,7 +44,10 @@ paths:
       summary: List Eval Traces (90-day retention)
   /kb/documents:
     post:
-      summary: Ingest document into Workspace internal KB (proxied to Data Plane; Phase B adds Kb Document Registry on CP)
+      summary: Ingest document (forward to Data Plane; persists Kb Document Registry metadata on CP)
+  /profiles/{profileId}/kb/documents:
+    get:
+      summary: List Kb Document Registry entries for a Profile (metadata only, no content)
   /kb/search:
     post:
       summary: Hybrid KB search (deprecated — proxied to Data Plane POST /kb/search)

@@ -26,6 +26,16 @@ export interface KnowledgeBaseConfig {
   retrievalMode?: KbRetrievalMode;
 }
 
+/** Control Plane metadata for an ingested KB document (no body on CP). */
+export interface KbDocumentRegistryEntry {
+  id: string;
+  workspaceId: WorkspaceId;
+  profileId: ProfileId;
+  title: string;
+  contentHash: string;
+  createdAt: Date;
+}
+
 export interface OrchestrationConfig {
   topology: OrchestrationTopology;
   workerProfileIds?: ProfileId[];

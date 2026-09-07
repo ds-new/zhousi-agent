@@ -7,6 +7,7 @@ import type {
   EvalTask,
   EvolutionRun,
   GovernanceTier,
+  KbDocumentRegistryEntry,
   MarketplaceSkill,
   MarketplaceSubscription,
   McpCatalogEntry,
@@ -195,6 +196,10 @@ export interface ControlPlaneStore {
     run: Omit<ProfileEvalRun, "id" | "createdAt">,
   ): Promise<ProfileEvalRun>;
   listProfileEvalRuns(profileId: ProfileId, limit?: number): Promise<ProfileEvalRun[]>;
+  registerKbDocument(
+    entry: Omit<KbDocumentRegistryEntry, "createdAt">,
+  ): Promise<KbDocumentRegistryEntry>;
+  listKbDocuments(profileId: ProfileId): Promise<KbDocumentRegistryEntry[]>;
   close?(): Promise<void>;
 }
 

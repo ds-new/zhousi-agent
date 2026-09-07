@@ -28,6 +28,7 @@ import {
 } from "./auth-middleware.js";
 import { collectCredentialRefIds, runProfileEvaluation } from "./profile-eval.js";
 import { proxyKbDocumentIngest, proxyKbSearch, type DataPlaneFetch } from "./kb-proxy.js";
+import { buildKbIngestResponse, computeKbContentHash } from "./kb-registry.js";
 import type { JwksOidcConfig } from "@diy-agent/auth";
 
 export interface ControlPlaneServer {
@@ -869,18 +870,42 @@ export function createControlPlaneServer(
       const profile = await store.getProfile(body.profileId as ProfileId);
       if (!profile) return json(res, 404, { error: "profile_not_found" });
       const tenant = await store.getTenantForProfile(profile.id);
+      const content = body.content as string;
+      const contentHash = computeKbContentHash(content);
       try {
         const proxied = await proxyKbDocumentIngest(
           kbProxyOptions,
           profile,
           tenant?.id,
           body.title as string,
-          body.content as string,
+          content,
         );
-        return json(res, proxied.status, proxied.json);
+        if (proxied.status !== 201) {
+          return json(res, proxied.status, proxied.json);
+        }
+        const documentId = String(proxied.json.id ?? "");
+        if (!documentId) {
+          return json(res, 502, { error: "data_plane_invalid_ingest_response" });
+        }
+        const registry = await store.registerKbDocument({
+          id: documentId,
+          workspaceId: profile.workspaceId,
+          profileId: profile.id,
+          title: body.title as string,
+          contentHash,
+        });
+        return json(res, 201, buildKbIngestResponse(registry));
       } catch {
         return json(res, 502, { error: "data_plane_unavailable" });
       }
+    }
+
+    const kbDocsMatch = path.match(/^\/profiles\/([^/]+)\/kb\/documents$/);
+    if (method === "GET" && kbDocsMatch) {
+      const profile = await store.getProfile(kbDocsMatch[1] as ProfileId);
+      if (!profile) return json(res, 404, { error: "profile_not_found" });
+      const documents = await store.listKbDocuments(profile.id);
+      return json(res, 200, { documents });
     }
 
     if (method === "POST" && path === "/kb/search") {

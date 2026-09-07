@@ -1,4 +1,4 @@
-import type { KnowledgeBaseConfig, ProfileId, ProfileVersionId } from "@diy-agent/domain";
+import type { KnowledgeBaseConfig, ProfileId, ProfileVersionId, WorkspaceId } from "@diy-agent/domain";
 import { getCachedProfileSync } from "@diy-agent/dsh-profile-sync-plugin";
 import { getCachedProfileSnapshot } from "@diy-agent/dsh-tenant-plugin";
 
@@ -22,11 +22,15 @@ function readKbConfig(snapshot: Record<string, unknown> | undefined): KnowledgeB
   return snapshot.kbConfig as KnowledgeBaseConfig;
 }
 
-export function resolveKbConfigForSession(input: {
+export interface KbSessionContext {
+  workspaceId: WorkspaceId;
   profileId: ProfileId;
   profileVersionId: ProfileVersionId;
+  tenantId?: string;
   kbConfig?: KnowledgeBaseConfig;
-}): KnowledgeBaseConfig {
+}
+
+export function resolveKbConfigForSession(input: KbSessionContext): KnowledgeBaseConfig {
   if (input.kbConfig) return input.kbConfig;
   return resolveKbConfigFromSnapshot(input.profileId, input.profileVersionId);
 }

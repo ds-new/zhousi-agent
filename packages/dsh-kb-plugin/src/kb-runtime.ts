@@ -48,6 +48,7 @@ export function resetKbRuntimeForTests(): void {
 
 export function createKbRuntime(deps: KbRuntimeDeps = {}): KbRuntime {
   const services = new Map<string, HybridKbService>();
+  let sharedMemoryStore: KbStore | null = null;
 
   function serviceKey(kbConfig: KnowledgeBaseConfig, tenantId?: TenantId, workspaceId?: WorkspaceId): string {
     return JSON.stringify({ kbConfig, tenantId, workspaceId });
@@ -67,7 +68,8 @@ export function createKbRuntime(deps: KbRuntimeDeps = {}): KbRuntime {
       return new PostgresKbStore(getOrCreatePool(databaseUrl), schema);
     }
 
-    return new InternalKbStore();
+    if (!sharedMemoryStore) sharedMemoryStore = new InternalKbStore();
+    return sharedMemoryStore;
   }
 
   function getService(
