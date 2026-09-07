@@ -278,6 +278,30 @@ export interface AccessPolicy {
   rules: AccessPolicyRule[];
 }
 
+/** Tenant default deny-by-default for high-sensitivity MCP writes. */
+export function defaultWorkspaceAccessPolicy(workspaceId: WorkspaceId): AccessPolicy {
+  return {
+    workspaceId,
+    rules: [
+      { effect: "allow", toolPattern: "*readonly*", sensitivity: "readonly" },
+      { effect: "deny", toolPattern: "*", sensitivity: "high" },
+      { effect: "ask", toolPattern: "*write*", sensitivity: "high" },
+    ],
+  };
+}
+
+export interface ProfileEvalRun {
+  id: string;
+  profileId: ProfileId;
+  profileVersionId: ProfileVersionId;
+  passRate: number;
+  p95LatencyMs: number;
+  toolSuccessRate: number;
+  pinGatePassed: boolean;
+  reasons: string[];
+  createdAt: Date;
+}
+
 export interface AuditEvent {
   id: string;
   tenantId: TenantId;

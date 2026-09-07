@@ -1,6 +1,7 @@
 import {
   DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
   SESSION_TOKEN_TTL_MS,
+  defaultWorkspaceAccessPolicy,
   isTraceExpired,
   isL1EvolutionSkillTargetAllowed,
   resolveModelRoute,
@@ -13,6 +14,7 @@ import {
   type McpCatalogEntry,
   type ProfileSyncEntry,
   type ProfileId,
+  type ProfileEvalRun,
   type SkillCatalogEntry,
   type MarketplaceSkill,
   type MarketplaceSubscription,
@@ -64,6 +66,7 @@ export class MemoryStore implements ControlPlaneStore {
   protected apiKeys = new Map<string, ApiKeyRecord>();
   protected workspaceMembers = new Map<string, WorkspaceMemberRecord>();
   protected workspacePolicies = new Map<string, AccessPolicy>();
+  protected profileEvalRuns = new Map<string, ProfileEvalRun>();
   protected webhooks = new Map<string, WebhookRegistration>();
   protected sessionTokens = new Map<string, { workspaceId: string; expiresAt: number }>();
   protected tokenUsageByTenant = new Map<string, { day: string; tokens: number }>();
@@ -142,6 +145,7 @@ export class MemoryStore implements ControlPlaneStore {
       createdAt: new Date(),
     };
     this.workspaces.set(id, ws);
+    await this.setWorkspacePolicy(defaultWorkspaceAccessPolicy(id));
     if (input.creatorUserId) {
       await this.addWorkspaceMember(id, input.creatorUserId, "admin");
     }
@@ -686,6 +690,25 @@ export class MemoryStore implements ControlPlaneStore {
 
   async getWorkspacePolicy(workspaceId: WorkspaceId): Promise<AccessPolicy | null> {
     return this.workspacePolicies.get(workspaceId) ?? null;
+  }
+
+  async saveProfileEvalRun(
+    run: Omit<ProfileEvalRun, "id" | "createdAt">,
+  ): Promise<ProfileEvalRun> {
+    const record: ProfileEvalRun = {
+      ...run,
+      id: crypto.randomUUID(),
+      createdAt: new Date(),
+    };
+    this.profileEvalRuns.set(record.id, record);
+    return record;
+  }
+
+  async listProfileEvalRuns(profileId: ProfileId, limit = 20): Promise<ProfileEvalRun[]> {
+    return [...this.profileEvalRuns.values()]
+      .filter((run) => run.profileId === profileId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit);
   }
 
   protected checkRateLimit(tenantId: string, rpm: number): QuotaCheckResult {

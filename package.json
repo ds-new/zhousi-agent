@@ -10,7 +10,7 @@
   "scripts": {
     "build": "npm run build -w @diy-agent/domain && npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run build && node --import tsx --test packages/domain/test/**/*.test.ts packages/auth/test/**/*.test.ts packages/eval-harness/test/**/*.test.ts packages/kb-rag/test/**/*.test.ts packages/db/test/**/*.test.ts packages/orchestrator/test/**/*.test.ts packages/dsh-memory-plugin/test/**/*.test.ts packages/dsh-vault-plugin/test/**/*.test.ts packages/dsh-profile-sync-plugin/test/**/*.test.ts services/control-plane/test/**/*.test.ts",
+    "test": "npm run build && node --import tsx --test packages/domain/test/**/*.test.ts packages/auth/test/**/*.test.ts packages/eval-harness/test/**/*.test.ts packages/kb-rag/test/**/*.test.ts packages/db/test/**/*.test.ts packages/orchestrator/test/**/*.test.ts packages/dsh-memory-plugin/test/**/*.test.ts packages/dsh-vault-plugin/test/**/*.test.ts packages/dsh-profile-sync-plugin/test/**/*.test.ts packages/dsh-policy-plugin/test/**/*.test.ts packages/dsh-trace-plugin/test/**/*.test.ts services/control-plane/test/**/*.test.ts",
     "dev:control-plane": "npm run dev -w @diy-agent/control-plane",
     "dev:evolution": "cd services/evolution && PYTHONPATH=. python3 server.py",
     "dev:data-plane": "npm run start -w @diy-agent/data-plane"

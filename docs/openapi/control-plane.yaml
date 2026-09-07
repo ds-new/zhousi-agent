@@ -21,6 +21,12 @@ paths:
   /profiles/{profileId}/pin:
     post:
       summary: Pin Profile version after Pin Gate (fires profile.pinned webhook with snapshot)
+  /profiles/{profileId}/eval/run:
+    post:
+      summary: Run Golden Task evaluation and return Pin Gate metrics
+  /profiles/{profileId}/eval/runs:
+    get:
+      summary: List persisted profile evaluation runs
   /tenants/{tenantId}/profile-sync:
     get:
       summary: List pinned profile snapshots for Enterprise Data Plane reconcile

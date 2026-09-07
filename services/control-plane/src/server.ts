@@ -12,6 +12,7 @@ import {
   type QuotaCheckResult,
 } from "@diy-agent/db";
 import type { AgentProfile, GovernanceTier, ProfileId, TenantId } from "@diy-agent/domain";
+import { defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
 import {
   invokeEvolutionService,
   scoreProfileTask,
@@ -27,6 +28,7 @@ import {
   type AuthMode,
   type ServiceAccountMode,
 } from "./auth-middleware.js";
+import { collectCredentialRefIds, runProfileEvaluation } from "./profile-eval.js";
 import type { JwksOidcConfig } from "@diy-agent/auth";
 
 export interface ControlPlaneServer {
@@ -224,10 +226,45 @@ export function createControlPlaneServer(
         profileVersionMatch[2]! as import("@diy-agent/domain").ProfileVersionId,
       );
       if (!version) return json(res, 404, { error: "version_not_found" });
+      const profile = await store.getProfile(profileVersionMatch[1] as ProfileId);
+      const policy =
+        profile &&
+        ((await store.getWorkspacePolicy(profile.workspaceId)) ??
+          defaultWorkspaceAccessPolicy(profile.workspaceId));
       return json(res, 200, {
         ...version,
-        credentialRefIds: [],
+        policy: policy ?? undefined,
+        credentialRefIds: profile ? collectCredentialRefIds(profile) : [],
       });
+    }
+
+    const evalRunMatch = path.match(/^\/profiles\/([^/]+)\/eval\/run$/);
+    if (method === "POST" && evalRunMatch) {
+      const body = await readBody(req);
+      const profileId = evalRunMatch[1] as ProfileId;
+      const profile = await store.getProfile(profileId);
+      if (!profile) return json(res, 404, { error: "profile_not_found" });
+      const versionId =
+        (body.versionId as import("@diy-agent/domain").ProfileVersionId | undefined) ??
+        profile.pinnedVersionId ??
+        (await store.getLatestProfileVersion(profileId))?.id;
+      if (!versionId) return json(res, 404, { error: "version_not_found" });
+      const evaluation = await runProfileEvaluation(store, profileId, versionId);
+      if (!evaluation) return json(res, 404, { error: "profile_not_found" });
+      return json(res, 200, {
+        results: evaluation.results,
+        gate: evaluation.gate,
+        evalRun: evaluation.evalRun,
+      });
+    }
+
+    const evalRunsMatch = path.match(/^\/profiles\/([^/]+)\/eval\/runs$/);
+    if (method === "GET" && evalRunsMatch) {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const limitParam = url.searchParams.get("limit");
+      const limit = limitParam ? Number(limitParam) : 20;
+      const runs = await store.listProfileEvalRuns(evalRunsMatch[1] as ProfileId, limit);
+      return json(res, 200, { runs });
     }
 
     const pinMatch = path.match(/^\/profiles\/([^/]+)\/pin$/);

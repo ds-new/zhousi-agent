@@ -24,18 +24,28 @@ export function apply(ctx: {
       const payload = args[0] as TracePayload | undefined;
       if (!payload?.profileId) return;
       pending.push(payload);
-      void flushTraces(process.env.DIY_CONTROL_PLANE_URL ?? "http://127.0.0.1:9878");
+      void flushTraces(
+        process.env.DIY_CONTROL_PLANE_URL ?? "http://127.0.0.1:9878",
+        process.env.DIY_SERVICE_ACCOUNT_TOKEN,
+      );
     });
   });
 }
 
-export async function flushTraces(controlPlaneUrl: string): Promise<void> {
+export async function flushTraces(
+  controlPlaneUrl: string,
+  serviceAccountToken?: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
   while (pending.length > 0) {
     const trace = pending.shift()!;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const token = serviceAccountToken ?? process.env.DIY_SERVICE_ACCOUNT_TOKEN;
+    if (token) headers.Authorization = `Bearer ${token}`;
     try {
-      await fetch(`${controlPlaneUrl}/traces`, {
+      await fetchImpl(`${controlPlaneUrl}/traces`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(trace),
       });
     } catch {

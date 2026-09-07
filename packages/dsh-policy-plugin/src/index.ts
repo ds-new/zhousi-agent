@@ -1,7 +1,8 @@
 /**
  * Access Policy gate — allow/deny/ask for MCP tool calls.
  */
-import type { AccessPolicy, AccessPolicyRule, McpBinding } from "@diy-agent/domain";
+import type { AccessPolicy, AccessPolicyRule, McpBinding, WorkspaceId } from "@diy-agent/domain";
+import { defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
 
 export const name = "@diy-agent/dsh-policy-plugin";
 export const inject = ["sessions"] as const;
@@ -43,14 +44,7 @@ export function setWorkspacePolicy(policy: AccessPolicy): void {
 }
 
 export function defaultTenantPolicy(workspaceId: string): AccessPolicy {
-  return {
-    workspaceId: workspaceId as AccessPolicy["workspaceId"],
-    rules: [
-      { effect: "allow", toolPattern: "*readonly*", sensitivity: "readonly" },
-      { effect: "deny", toolPattern: "*", sensitivity: "high" },
-      { effect: "ask", toolPattern: "*write*", sensitivity: "high" },
-    ],
-  };
+  return defaultWorkspaceAccessPolicy(workspaceId as WorkspaceId);
 }
 
 export function evaluatePolicy(workspaceId: string, call: ToolCallContext): PolicyDecision {

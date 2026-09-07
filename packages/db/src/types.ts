@@ -11,6 +11,7 @@ import type {
   MarketplaceSubscription,
   McpCatalogEntry,
   ProfileId,
+  ProfileEvalRun,
   SkillCatalogEntry,
   SkillEvolutionTarget,
   Tenant,
@@ -190,6 +191,10 @@ export interface ControlPlaneStore {
   ): Promise<WorkspaceMemberRecord | null>;
   setWorkspacePolicy(policy: AccessPolicy): Promise<AccessPolicy>;
   getWorkspacePolicy(workspaceId: WorkspaceId): Promise<AccessPolicy | null>;
+  saveProfileEvalRun(
+    run: Omit<ProfileEvalRun, "id" | "createdAt">,
+  ): Promise<ProfileEvalRun>;
+  listProfileEvalRuns(profileId: ProfileId, limit?: number): Promise<ProfileEvalRun[]>;
   close?(): Promise<void>;
 }
 
