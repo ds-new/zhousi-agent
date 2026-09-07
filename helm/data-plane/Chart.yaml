@@ -1,0 +1,6 @@
+apiVersion: v2
+name: diy-data-plane
+description: DIY Agent Data Plane (Enterprise VPC)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

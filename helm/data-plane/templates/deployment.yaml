@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-data-plane
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-data-plane
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-data-plane
+    spec:
+      containers:
+        - name: data-plane
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - name: DIY_DATA_PLANE_PORT
+              value: {{ .Values.env.diyDataPlanePort | quote }}
+            - name: DIY_CONTROL_PLANE_URL
+              value: {{ .Values.env.controlPlaneUrl | quote }}
+            - name: DIY_TENANT_ID
+              value: {{ .Values.env.tenantId | quote }}
+            - name: DIY_ENTERPRISE_MODE
+              value: {{ .Values.env.enterpriseMode | quote }}
+            - name: DIY_KMS_KEY_MATERIAL
+              value: {{ .Values.env.kmsKeyMaterial | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-data-plane
+spec:
+  selector:
+    app: {{ .Release.Name }}-data-plane
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}

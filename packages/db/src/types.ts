@@ -115,6 +115,7 @@ export interface ControlPlaneStore {
   ): Promise<CredentialRefRecord>;
   appendAudit(event: Omit<AuditEvent, "id" | "createdAt">): Promise<AuditEvent>;
   listAuditLog(tenantId: Tenant["id"], limit?: number): Promise<AuditEvent[]>;
+  listProfileSyncEntries(tenantId: Tenant["id"]): Promise<import("@diy-agent/domain").ProfileSyncEntry[]>;
   registerWebhook(
     entry: Omit<WebhookRegistration, "id" | "createdAt">,
   ): Promise<WebhookRegistration>;

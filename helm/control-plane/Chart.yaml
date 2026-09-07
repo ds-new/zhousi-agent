@@ -1,0 +1,6 @@
+apiVersion: v2
+name: diy-control-plane
+description: DIY Agent Control Plane (SaaS)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -10,6 +10,7 @@ import {
   type EvalTask,
   type EvolutionRun,
   type McpCatalogEntry,
+  type ProfileSyncEntry,
   type ProfileId,
   type SkillCatalogEntry,
   type Tenant,
@@ -361,6 +362,25 @@ export class MemoryStore implements ControlPlaneStore {
   async listAuditLog(tenantId: Tenant["id"], limit = 100): Promise<AuditEvent[]> {
     const events = this.auditLog.filter((entry) => entry.tenantId === tenantId);
     return events.slice(-limit).reverse();
+  }
+
+  async listProfileSyncEntries(tenantId: Tenant["id"]): Promise<ProfileSyncEntry[]> {
+    const workspaceIds = new Set(
+      [...this.workspaces.values()].filter((ws) => ws.tenantId === tenantId).map((ws) => ws.id),
+    );
+    const entries: ProfileSyncEntry[] = [];
+    for (const profile of this.profiles.values()) {
+      if (!workspaceIds.has(profile.workspaceId) || !profile.pinnedVersionId) continue;
+      const version = this.profileVersions.get(profile.pinnedVersionId);
+      if (!version) continue;
+      entries.push({
+        profileId: profile.id,
+        versionId: profile.pinnedVersionId,
+        snapshot: version.snapshot as unknown as Record<string, unknown>,
+        pinnedAt: version.createdAt,
+      });
+    }
+    return entries;
   }
 
   async registerWebhook(

@@ -20,7 +20,10 @@ paths:
       summary: Pull pinned Profile snapshot for Data Plane sync
   /profiles/{profileId}/pin:
     post:
-      summary: Pin Profile version after Pin Gate
+      summary: Pin Profile version after Pin Gate (fires profile.pinned webhook with snapshot)
+  /tenants/{tenantId}/profile-sync:
+    get:
+      summary: List pinned profile snapshots for Enterprise Data Plane reconcile
   /sessions:
     post:
       summary: Create Session with scoped token

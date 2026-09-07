@@ -1,0 +1,19 @@
+replicaCount: 1
+
+image:
+  repository: diy-agent/data-plane
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3080
+
+env:
+  diyDataPlanePort: "3080"
+  controlPlaneUrl: "https://control-plane.example.com"
+  tenantId: ""
+  enterpriseMode: "true"
+  kmsKeyMaterial: ""
+
+resources: {}

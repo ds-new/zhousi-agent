@@ -1,0 +1,15 @@
+# Enterprise DSH overlay — vault + profile-sync add-ons (Sprint 3)
+# Use with: dsh --profile web --patch ./cordis.enterprise.patch.yml
+
+- insert:
+  - id: diy-vault
+    name: "@diy-agent/dsh-vault-plugin"
+    config:
+      kmsKeyMaterial: !!js "process.env.DIY_KMS_KEY_MATERIAL ?? ''"
+      tenantId: !!js "process.env.DIY_TENANT_ID ?? ''"
+  - id: diy-profile-sync
+    name: "@diy-agent/dsh-profile-sync-plugin"
+    config:
+      controlPlaneUrl: !!js "process.env.DIY_CONTROL_PLANE_URL ?? 'http://127.0.0.1:9878'"
+      tenantId: !!js "process.env.DIY_TENANT_ID ?? ''"
+      enterpriseMode: true

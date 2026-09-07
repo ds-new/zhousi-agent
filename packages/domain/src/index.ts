@@ -52,10 +52,23 @@ export const DEFAULT_MAX_WARM_MCP_CONNECTIONS = 10;
 export const MIN_GOLDEN_TASKS_FOR_PIN = 5;
 export const SESSION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 export const EVAL_TRACE_RETENTION_DAYS = 90;
+export const PROFILE_SYNC_RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 
 export function isTraceExpired(createdAt: Date, now = new Date()): boolean {
   const cutoffMs = EVAL_TRACE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   return createdAt.getTime() < now.getTime() - cutoffMs;
+}
+
+export interface ProfileSyncEntry {
+  profileId: ProfileId;
+  versionId: ProfileVersionId;
+  snapshot: Record<string, unknown>;
+  pinnedAt: Date;
+}
+
+/** L3-protected paths — evolution must never mutate vault/credentials. */
+export function isL3ProtectedMutationPath(path: string): boolean {
+  return path.startsWith("vault/") || path.startsWith("credentials/");
 }
 
 export interface Tenant {
@@ -63,6 +76,7 @@ export interface Tenant {
   name: string;
   dbSchema: string;
   isolationMode: IsolationMode;
+  dedicatedDatabaseUrl?: string;
   gateway: TenantGateway;
   createdAt: Date;
 }

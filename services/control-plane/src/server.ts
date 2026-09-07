@@ -222,6 +222,7 @@ export function createControlPlaneServer(
 
       const pinned = await store.pinProfile(profileId, versionId);
       if (!pinned) return json(res, 404, { error: "version_not_found" });
+      const pinnedVersion = await store.getProfileVersion(profileId, versionId);
       await store.appendAudit({
         tenantId: body.tenantId as import("@diy-agent/domain").Tenant["id"],
         workspaceId: profile.workspaceId,
@@ -231,8 +232,19 @@ export function createControlPlaneServer(
       await fireWebhooks(body.tenantId as string, "profile.pinned", {
         profileId,
         versionId,
+        snapshot: pinnedVersion?.snapshot,
+        pinnedAt: new Date().toISOString(),
       });
       return json(res, 200, { profile: pinned, gate });
+    }
+
+    const profileSyncMatch = path.match(/^\/tenants\/([^/]+)\/profile-sync$/);
+    if (method === "GET" && profileSyncMatch) {
+      const tenantId = profileSyncMatch[1] as TenantId;
+      const tenant = await store.getTenant(tenantId);
+      if (!tenant) return json(res, 404, { error: "tenant_not_found" });
+      const profiles = await store.listProfileSyncEntries(tenantId);
+      return json(res, 200, { tenantId, profiles });
     }
 
     if (method === "POST" && path === "/sessions") {

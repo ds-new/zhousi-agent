@@ -8,5 +8,6 @@ CREATE TABLE IF NOT EXISTS platform.tenants (
   db_schema TEXT NOT NULL,
   isolation_mode TEXT NOT NULL DEFAULT 'schema',
   gateway JSONB NOT NULL DEFAULT '{}',
+  dedicated_database_url TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

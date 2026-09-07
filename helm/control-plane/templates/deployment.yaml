@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-control-plane
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-control-plane
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-control-plane
+    spec:
+      containers:
+        - name: control-plane
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - name: DIY_CONTROL_PLANE_PORT
+              value: {{ .Values.env.diyControlPlanePort | quote }}
+            - name: DATABASE_URL
+              value: {{ .Values.env.databaseUrl | quote }}
+            - name: DIY_EVOLUTION_URL
+              value: {{ .Values.env.evolutionUrl | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-control-plane
+spec:
+  selector:
+    app: {{ .Release.Name }}-control-plane
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}

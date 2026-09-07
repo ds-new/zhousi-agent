@@ -37,3 +37,17 @@ services:
       DIY_EVOLUTION_PORT: "9880"
     ports:
       - "9880:9880"
+
+  data-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile.data-plane
+    environment:
+      DIY_DATA_PLANE_PORT: "3080"
+      DIY_CONTROL_PLANE_URL: http://control-plane:9878
+      DIY_ENTERPRISE_MODE: "true"
+    ports:
+      - "3080:3080"
+    depends_on:
+      control-plane:
+        condition: service_started

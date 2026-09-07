@@ -1,0 +1,11 @@
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY packages ./packages
+COPY services/data-plane ./services/data-plane
+COPY tsconfig.base.json ./
+RUN npm install && npm run build -w @diy-agent/data-plane
+WORKDIR /app/services/data-plane
+EXPOSE 3080
+ENV DIY_DATA_PLANE_PORT=3080
+CMD ["node", "dist/index.js"]

@@ -1,0 +1,17 @@
+replicaCount: 1
+
+image:
+  repository: diy-agent/control-plane
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 9878
+
+env:
+  diyControlPlanePort: "9878"
+  databaseUrl: ""
+  evolutionUrl: "http://diy-evolution:9880"
+
+resources: {}
