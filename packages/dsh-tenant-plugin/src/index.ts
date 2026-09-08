@@ -12,7 +12,7 @@ const META_KEYS = [
 ] as const;
 
 interface SessionsService {
-  create: (id: string, opts?: { meta?: Record<string, string> }) => { meta?: Record<string, string> };
+  create: (id: string, opts?: { meta?: Record<string, string> }) => unknown;
 }
 
 interface Context {
@@ -20,63 +20,19 @@ interface Context {
   effect: (fn: () => void | (() => void)) => void;
 }
 
-export interface ProfileSnapshotResponse {
-  snapshot: Record<string, unknown>;
-  credentialRefIds: string[];
-}
-
-export async function pullProfileSnapshot(
-  controlPlaneUrl: string,
-  profileId: string,
-  versionId: string,
-): Promise<ProfileSnapshotResponse | null> {
-  try {
-    const res = await fetch(`${controlPlaneUrl}/profiles/${profileId}/versions/${versionId}`);
-    if (!res.ok) return null;
-    const body = (await res.json()) as { snapshot: Record<string, unknown>; credentialRefIds?: string[] };
-    return {
-      snapshot: body.snapshot,
-      credentialRefIds: body.credentialRefIds ?? [],
-    };
-  } catch {
-    return null;
+export function validateSessionMeta(meta: Record<string, unknown>): void {
+  for (const key of META_KEYS) {
+    if (!meta[key]) {
+      throw new Error(`Session requires ${key}. Create via Control Plane API first.`);
+    }
   }
 }
 
-const snapshotCache = new Map<string, ProfileSnapshotResponse>();
-
-export function cacheProfileSnapshot(
-  profileId: string,
-  versionId: string,
-  snapshot: ProfileSnapshotResponse,
-): void {
-  snapshotCache.set(`${profileId}:${versionId}`, snapshot);
-}
-
-export function getCachedProfileSnapshot(
-  profileId: string,
-  versionId: string,
-): ProfileSnapshotResponse | null {
-  return snapshotCache.get(`${profileId}:${versionId}`) ?? null;
-}
-
-export function apply(ctx: Context, config: { controlPlaneUrl?: string }): void {
-  const controlPlaneUrl = config.controlPlaneUrl ?? process.env.DIY_CONTROL_PLANE_URL ?? "http://127.0.0.1:9878";
-
+export function apply(ctx: Context): void {
   ctx.effect(() => {
     const originalCreate = ctx.sessions.create.bind(ctx.sessions);
     ctx.sessions.create = (id, opts) => {
-      const meta = opts?.meta ?? {};
-      for (const key of META_KEYS) {
-        if (!meta[key]) {
-          throw new Error(`Session requires ${key}. Create via Control Plane API first.`);
-        }
-      }
-      const profileId = String(meta["diy.profileId"]);
-      const versionId = String(meta["diy.profileVersionId"]);
-      void pullProfileSnapshot(controlPlaneUrl, profileId, versionId).then((snapshot) => {
-        if (snapshot) cacheProfileSnapshot(profileId, versionId, snapshot);
-      });
+      validateSessionMeta(opts?.meta ?? {});
       return originalCreate(id, opts);
     };
     return () => {
@@ -92,8 +48,4 @@ export function extractTenantContext(meta: Record<string, unknown>) {
     profileId: String(meta["diy.profileId"]),
     profileVersionId: String(meta["diy.profileVersionId"]),
   };
-}
-
-export function resetSnapshotCacheForTests(): void {
-  snapshotCache.clear();
 }

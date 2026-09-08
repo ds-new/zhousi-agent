@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@diy-agent/domain": "*"
+    "@diy-agent/domain": "*",
+    "@diy-agent/dsh-bootstrap-plugin": "*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*"

@@ -262,4 +262,25 @@ describe("Phase 3 — marketplace, evolution guard, service account", () => {
     );
     assert.equal(status, 201);
   });
+
+  it("requires service account for MCP catalog GET", async () => {
+    const { json: tenant } = await request(cp.baseUrl, "POST", "/tenants", { name: "McpCatalogCo" });
+    const tenantId = tenant.id as string;
+
+    const { status: anonStatus } = await request(
+      cp.baseUrl,
+      "GET",
+      `/mcp/catalog?tenantId=${tenantId}`,
+    );
+    assert.equal(anonStatus, 401);
+
+    const { status: authedStatus } = await request(
+      cp.baseUrl,
+      "GET",
+      `/mcp/catalog?tenantId=${tenantId}`,
+      undefined,
+      { Authorization: `Bearer ${serviceToken}` },
+    );
+    assert.equal(authedStatus, 200);
+  });
 });

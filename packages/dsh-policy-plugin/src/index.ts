@@ -3,6 +3,7 @@
  */
 import type { AccessPolicy, AccessPolicyRule, McpBinding, WorkspaceId } from "@diy-agent/domain";
 import { defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
+import { assertMcpCatalogApproved, getActiveBootstrapBundle } from "@diy-agent/dsh-bootstrap-plugin/bundle";
 
 export const name = "@diy-agent/dsh-policy-plugin";
 export const inject = ["sessions"] as const;
@@ -28,6 +29,13 @@ export function apply(ctx: {
     ctx.on("tool/before-call", (...args: unknown[]) => {
       const call = args[0] as ToolCallContext | undefined;
       if (!call?.workspaceId) return;
+
+      const bundle = getActiveBootstrapBundle(call.workspaceId);
+      if (bundle) {
+        const serverName = call.binding?.serverName ?? parseMcpServerFromToolName(call.toolName);
+        if (serverName) assertMcpCatalogApproved(serverName, bundle);
+      }
+
       const decision = evaluatePolicy(call.workspaceId, call);
       if (decision.effect === "deny") {
         throw new Error(`policy_denied: ${decision.reason}`);
@@ -41,6 +49,10 @@ export function apply(ctx: {
 
 export function setWorkspacePolicy(policy: AccessPolicy): void {
   policies.set(policy.workspaceId, policy);
+}
+
+export function getWorkspacePolicy(workspaceId: string): AccessPolicy {
+  return policies.get(workspaceId) ?? defaultTenantPolicy(workspaceId);
 }
 
 export function defaultTenantPolicy(workspaceId: string): AccessPolicy {
@@ -67,6 +79,11 @@ function matchPattern(pattern: string, toolName: string): boolean {
   if (pattern === "*") return true;
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${escaped}$`, "i").test(toolName);
+}
+
+function parseMcpServerFromToolName(toolName: string): string | null {
+  const match = /^mcp__(.+?)__.+$/.exec(toolName);
+  return match?.[1] ?? null;
 }
 
 export function resetPoliciesForTests(): void {

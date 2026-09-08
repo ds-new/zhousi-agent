@@ -1,6 +1,6 @@
 import type { KnowledgeBaseConfig, ProfileId, ProfileVersionId, WorkspaceId } from "@diy-agent/domain";
+import { getProfileBootstrapBundle } from "@diy-agent/dsh-bootstrap-plugin/bundle";
 import { getCachedProfileSync } from "@diy-agent/dsh-profile-sync-plugin";
-import { getCachedProfileSnapshot } from "@diy-agent/dsh-tenant-plugin";
 
 export function resolveKbConfigFromSnapshot(
   profileId: string,
@@ -10,9 +10,10 @@ export function resolveKbConfigFromSnapshot(
   const syncConfig = readKbConfig(syncEntry?.snapshot);
   if (syncConfig) return syncConfig;
 
-  const tenantEntry = getCachedProfileSnapshot(profileId, profileVersionId);
-  const tenantConfig = readKbConfig(tenantEntry?.snapshot);
-  if (tenantConfig) return tenantConfig;
+  const bundle = getProfileBootstrapBundle(profileId, profileVersionId);
+  if (bundle?.kbConfig) return bundle.kbConfig;
+  const bundleSnapshotConfig = readKbConfig(bundle?.snapshot);
+  if (bundleSnapshotConfig) return bundleSnapshotConfig;
 
   throw new Error("kb_config_unavailable");
 }

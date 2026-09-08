@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@diy-agent/domain": "*",
+    "@diy-agent/dsh-bootstrap-plugin": "*",
     "@diy-agent/dsh-profile-sync-plugin": "*",
-    "@diy-agent/dsh-tenant-plugin": "*",
     "@diy-agent/kb-rag": "*",
     "pg": "^8.13.1"
   },

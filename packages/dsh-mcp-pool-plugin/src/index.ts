@@ -7,6 +7,7 @@ import {
   shouldWarmPool,
   type McpBinding,
 } from "@diy-agent/domain";
+import { assertMcpCatalogApproved, getActiveBootstrapBundle } from "@diy-agent/dsh-bootstrap-plugin/bundle";
 
 export const name = "@diy-agent/dsh-mcp-pool-plugin";
 export const inject = ["tools"] as const;
@@ -39,6 +40,11 @@ export function apply(_ctx: unknown, config: McpPoolConfig): void {
 }
 
 export function acquire(binding: McpBinding, ctx: PoolContext = {}): PooledConnection {
+  const bundle = ctx.workspaceId ? getActiveBootstrapBundle(ctx.workspaceId) : null;
+  if (bundle) {
+    assertMcpCatalogApproved(binding.serverName, bundle);
+  }
+
   if (!shouldWarmPool(binding)) {
     return {
       serverName: binding.serverName,

@@ -570,6 +570,7 @@ export function createControlPlaneServer(
     }
 
     if (method === "GET" && path.startsWith("/mcp/catalog")) {
+      if (!requireServiceAccount(req, res, serviceAccountOptions)) return;
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const tenantId = url.searchParams.get("tenantId");
       if (!tenantId) return json(res, 400, { error: "missing_tenant_id" });

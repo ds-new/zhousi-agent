@@ -86,6 +86,21 @@ export interface ProfileSyncEntry {
   pinnedAt: Date;
 }
 
+/** Materialized Session Bootstrap config for Data Plane runtime enforcement. */
+export interface ProfileBootstrapBundle {
+  profileId: ProfileId;
+  profileVersionId: ProfileVersionId;
+  workspaceId: WorkspaceId;
+  tenantId: TenantId;
+  snapshot: Record<string, unknown>;
+  policy: AccessPolicy;
+  credentialRefIds: string[];
+  mcpCatalog: McpCatalogEntry[];
+  blockedMcpServers: string[];
+  kbConfig?: KnowledgeBaseConfig;
+  pinnedAt?: Date;
+}
+
 /** L3-protected paths — evolution must never mutate vault/credentials. */
 export function isL3ProtectedMutationPath(path: string): boolean {
   return path.startsWith("vault/") || path.startsWith("credentials/");

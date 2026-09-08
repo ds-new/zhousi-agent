@@ -105,3 +105,7 @@ _Avoid_: Log, Span
 **Profile Sync**:
 Control Plane 将 pinned Profile 版本分发至 Data Plane 的机制（pull / push / webhook）。
 _Avoid_: Config deploy, Version rollout
+
+**Session Bootstrap**:
+Data Plane 在 Session 创建时将 Control Plane（或 Enterprise profile-sync 缓存）中的 Profile 配置 materialize 为 `ProfileBootstrapBundle`，并向 runtime 插件注入 Access Policy、MCP 审批 blocklist 与 KB 配置，确保首轮 turn 即生效。
+_Avoid_: Config loader, Startup hook

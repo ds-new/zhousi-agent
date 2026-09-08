@@ -4,18 +4,20 @@
 - insert:
   - id: diy-tenant
     name: "@diy-agent/dsh-tenant-plugin"
+  - id: diy-bootstrap
+    name: "@diy-agent/dsh-bootstrap-plugin"
     config:
       controlPlaneUrl: !!js "process.env.DIY_CONTROL_PLANE_URL ?? 'http://127.0.0.1:9878'"
-  - id: diy-memory
-    name: "@diy-agent/dsh-memory-plugin"
+  - id: diy-policy
+    name: "@diy-agent/dsh-policy-plugin"
   - id: diy-mcp-pool
     name: "@diy-agent/dsh-mcp-pool-plugin"
     config:
       warmPoolDefault: true
       idleTimeoutMs: 300000
       maxConnectionsPerTenant: 10
-  - id: diy-policy
-    name: "@diy-agent/dsh-policy-plugin"
+  - id: diy-memory
+    name: "@diy-agent/dsh-memory-plugin"
   - id: diy-trace
     name: "@diy-agent/dsh-trace-plugin"
   - id: diy-kb

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it, beforeEach } from "node:test";
 import { resetInternalIndexForTests } from "@diy-agent/kb-rag";
-import { cacheProfileSnapshot } from "@diy-agent/dsh-tenant-plugin";
+import { storeProfileBootstrapBundle, buildProfileBootstrapBundle } from "@diy-agent/dsh-bootstrap-plugin";
 import { handleProfilePinnedWebhook } from "@diy-agent/dsh-profile-sync-plugin";
 import {
   createKbRuntime,
@@ -18,11 +18,16 @@ describe("dsh-kb-plugin snapshot resolver", () => {
     resetKbPluginForTests();
   });
 
-  it("prefers profile-sync cache over tenant-plugin cache", () => {
-    cacheProfileSnapshot("prof-1", "ver-1", {
-      snapshot: { kbConfig: { internal: { enabled: true } } },
-      credentialRefIds: [],
-    });
+  it("prefers profile-sync cache over bootstrap bundle cache", () => {
+    storeProfileBootstrapBundle(
+      buildProfileBootstrapBundle({
+        profileId: "prof-1" as import("@diy-agent/domain").ProfileId,
+        profileVersionId: "ver-1" as import("@diy-agent/domain").ProfileVersionId,
+        workspaceId: "ws-1" as import("@diy-agent/domain").WorkspaceId,
+        tenantId: "t-1" as import("@diy-agent/domain").TenantId,
+        snapshot: { kbConfig: { internal: { enabled: true } } },
+      }),
+    );
     handleProfilePinnedWebhook({
       profileId: "prof-1",
       versionId: "ver-1",
@@ -40,6 +45,30 @@ describe("dsh-kb-plugin snapshot resolver", () => {
 
     const config = resolveKbConfigFromSnapshot("prof-1", "ver-1");
     assert.equal(config.externalMcp?.serverName, "sync-search");
+  });
+
+  it("reads kbConfig from bootstrap bundle when profile-sync misses", () => {
+    storeProfileBootstrapBundle(
+      buildProfileBootstrapBundle({
+        profileId: "prof-2" as import("@diy-agent/domain").ProfileId,
+        profileVersionId: "ver-2" as import("@diy-agent/domain").ProfileVersionId,
+        workspaceId: "ws-2" as import("@diy-agent/domain").WorkspaceId,
+        tenantId: "t-2" as import("@diy-agent/domain").TenantId,
+        snapshot: {
+          kbConfig: {
+            internal: { enabled: true },
+            externalMcp: {
+              serverName: "bundle-search",
+              transport: "stdio",
+              sensitivity: "readonly",
+            },
+          },
+        },
+      }),
+    );
+
+    const config = resolveKbConfigFromSnapshot("prof-2", "ver-2");
+    assert.equal(config.externalMcp?.serverName, "bundle-search");
   });
 
   it("throws kb_config_unavailable when caches miss", () => {
