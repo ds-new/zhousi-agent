@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it, beforeEach } from "node:test";
 import { resetInternalIndexForTests } from "@diy-agent/kb-rag";
-import { storeProfileBootstrapBundle, buildProfileBootstrapBundle } from "@diy-agent/dsh-bootstrap-plugin";
+import { storeProfileBootstrapBundle, buildProfileBootstrapBundle, resetBootstrapCacheForTests } from "@diy-agent/dsh-bootstrap-plugin";
+import { defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
 import { handleProfilePinnedWebhook } from "@diy-agent/dsh-profile-sync-plugin";
 import {
   createKbRuntime,
@@ -16,6 +17,7 @@ describe("dsh-kb-plugin snapshot resolver", () => {
     resetInternalIndexForTests();
     resetKbRuntimeForTests();
     resetKbPluginForTests();
+    resetBootstrapCacheForTests();
   });
 
   it("prefers profile-sync cache over bootstrap bundle cache", () => {
@@ -31,6 +33,8 @@ describe("dsh-kb-plugin snapshot resolver", () => {
     handleProfilePinnedWebhook({
       profileId: "prof-1",
       versionId: "ver-1",
+      workspaceId: "ws-1",
+      tenantId: "t-1",
       snapshot: {
         kbConfig: {
           internal: { enabled: true },
@@ -41,6 +45,9 @@ describe("dsh-kb-plugin snapshot resolver", () => {
           },
         },
       },
+      policy: defaultWorkspaceAccessPolicy("ws-1" as import("@diy-agent/domain").WorkspaceId),
+      credentialRefIds: [],
+      mcpCatalog: [],
     });
 
     const config = resolveKbConfigFromSnapshot("prof-1", "ver-1");
@@ -81,6 +88,7 @@ describe("dsh-kb-plugin kb_search tool", () => {
     resetInternalIndexForTests();
     resetKbRuntimeForTests();
     resetKbPluginForTests();
+    resetBootstrapCacheForTests();
   });
 
   it("searches internal KB via registered tool handler", async () => {

@@ -47,10 +47,16 @@ interface PluginContext {
   effect: (fn: () => void | (() => void)) => void;
 }
 
+export {
+  materializeProfileBootstrapBundleFromSync,
+  type ProfileSyncBootstrapPayload,
+} from "./sync-materialize.js";
+
 export interface BootstrapPluginConfig {
   controlPlaneUrl?: string;
   serviceAccountToken?: string;
   fetchImpl?: FetchLike;
+  offline?: boolean;
 }
 
 export function applyBootstrapToRuntime(bundle: ProfileBootstrapBundle): void {
@@ -62,6 +68,8 @@ export function applyBootstrapToRuntime(bundle: ProfileBootstrapBundle): void {
 export function apply(ctx: PluginContext, config: BootstrapPluginConfig = {}): void {
   const controlPlaneUrl =
     config.controlPlaneUrl ?? process.env.DIY_CONTROL_PLANE_URL ?? "http://127.0.0.1:9878";
+  const offline =
+    config.offline ?? process.env.DIY_ENTERPRISE_OFFLINE === "true";
 
   ctx.effect(() => {
     const originalCreate = ctx.sessions.create.bind(ctx.sessions);
@@ -73,6 +81,7 @@ export function apply(ctx: PluginContext, config: BootstrapPluginConfig = {}): v
         controlPlaneUrl,
         serviceAccountToken: config.serviceAccountToken ?? process.env.DIY_SERVICE_ACCOUNT_TOKEN,
         fetchImpl: config.fetchImpl,
+        offline,
         profileId: sessionCtx.profileId as ProfileBootstrapBundle["profileId"],
         profileVersionId: sessionCtx.profileVersionId as ProfileVersionId,
         workspaceId: sessionCtx.workspaceId as ProfileBootstrapBundle["workspaceId"],

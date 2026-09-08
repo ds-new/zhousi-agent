@@ -1,4 +1,5 @@
 import type { AgentProfile, ProfileId, ProfileVersionId } from "@diy-agent/domain";
+import { collectCredentialRefIds } from "@diy-agent/domain";
 import {
   evaluatePinGate,
   scoreProfileTask,
@@ -6,20 +7,7 @@ import {
 } from "@diy-agent/eval-harness";
 import type { ControlPlaneStore, EvalTraceRecord } from "@diy-agent/db";
 
-export function collectCredentialRefIds(profile: AgentProfile): string[] {
-  const refs = new Set<string>();
-  let route: AgentProfile["modelRoute"] | undefined = profile.modelRoute;
-  while (route) {
-    if (route.apiKeyRef) refs.add(route.apiKeyRef);
-    route = route.fallback;
-  }
-  for (const binding of profile.mcpBindings) {
-    if (binding.envRef) {
-      for (const value of Object.values(binding.envRef)) refs.add(value);
-    }
-  }
-  return [...refs];
-}
+export { collectCredentialRefIds };
 
 function tracesToEval(traces: EvalTraceRecord[]): EvalTrace[] {
   return traces.map((t) => ({

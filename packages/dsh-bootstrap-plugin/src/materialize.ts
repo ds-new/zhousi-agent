@@ -23,6 +23,7 @@ export interface MaterializeBootstrapInput {
   workspaceId: WorkspaceId;
   tenantId: TenantId;
   fetchImpl?: FetchLike;
+  offline?: boolean;
 }
 
 function authHeaders(token: string | undefined): Record<string, string> {
@@ -85,6 +86,12 @@ export function isDevDegradeEnabled(): boolean {
 export async function materializeProfileBootstrapBundle(
   input: MaterializeBootstrapInput,
 ): Promise<ProfileBootstrapBundle> {
+  const cached = getProfileBootstrapBundle(input.profileId, input.profileVersionId);
+  if (input.offline) {
+    if (!cached) throw new Error("bootstrap_unavailable:offline_cache_miss");
+    return cached;
+  }
+
   try {
     const version = await fetchProfileVersion(input);
     const mcpCatalog = await fetchMcpCatalog(input);
@@ -99,9 +106,8 @@ export async function materializeProfileBootstrapBundle(
       mcpCatalog,
     });
   } catch (err) {
+    if (cached) return cached;
     if (isDevDegradeEnabled()) {
-      const cached = getProfileBootstrapBundle(input.profileId, input.profileVersionId);
-      if (cached) return cached;
       return buildProfileBootstrapBundle({
         profileId: input.profileId,
         profileVersionId: input.profileVersionId,

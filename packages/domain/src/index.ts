@@ -82,8 +82,31 @@ export function isTraceExpired(createdAt: Date, now = new Date()): boolean {
 export interface ProfileSyncEntry {
   profileId: ProfileId;
   versionId: ProfileVersionId;
+  workspaceId: WorkspaceId;
+  tenantId: TenantId;
   snapshot: Record<string, unknown>;
+  policy: AccessPolicy;
+  credentialRefIds: string[];
+  mcpCatalog: McpCatalogEntry[];
   pinnedAt: Date;
+}
+
+/** Collect vault credential ref paths from profile model route and MCP bindings. */
+export function collectCredentialRefIds(
+  profile: Pick<AgentProfile, "modelRoute" | "mcpBindings">,
+): string[] {
+  const refs = new Set<string>();
+  let route: ModelRoute | undefined = profile.modelRoute;
+  while (route) {
+    if (route.apiKeyRef) refs.add(route.apiKeyRef);
+    route = route.fallback;
+  }
+  for (const binding of profile.mcpBindings) {
+    if (binding.envRef) {
+      for (const value of Object.values(binding.envRef)) refs.add(value);
+    }
+  }
+  return [...refs];
 }
 
 /** Materialized Session Bootstrap config for Data Plane runtime enforcement. */

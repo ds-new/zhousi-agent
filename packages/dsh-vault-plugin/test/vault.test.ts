@@ -8,6 +8,7 @@ import {
   injectMcpEnv,
   resolveCredentialRef,
   setVaultSecret,
+  apply,
 } from "../src/index.js";
 
 describe("dsh-vault-plugin", () => {
@@ -40,5 +41,33 @@ describe("dsh-vault-plugin", () => {
     assert.equal(isL3ProtectedMutationPath("vault/tenant/x"), true);
     assert.equal(isL3ProtectedMutationPath("credentials/ref-1"), true);
     assert.equal(isL3ProtectedMutationPath("skills/0"), false);
+  });
+
+  it("lazy injects MCP env on tool/before-call", () => {
+    const key = deriveVaultKey("kms", "tenant-a");
+    const blob = encryptVault({ "tenant/t1/mcp/github": "ghp_abc" }, key);
+    const handlers = new Map<string, (args: unknown) => void>();
+    apply(
+      {
+        effect(fn) {
+          fn();
+        },
+        on(event, handler) {
+          handlers.set(event, handler);
+        },
+      },
+      { kmsKeyMaterial: "kms", tenantId: "tenant-a", vaultEncBlob: blob },
+    );
+
+    const call = {
+      toolName: "mcp__github__run",
+      binding: {
+        serverName: "github",
+        transport: "stdio" as const,
+        envRef: { GITHUB_TOKEN: "vault://tenant/t1/mcp/github" },
+      },
+    };
+    handlers.get("tool/before-call")!(call);
+    assert.equal(call.env?.GITHUB_TOKEN, "ghp_abc");
   });
 });

@@ -10,6 +10,7 @@ import {
   buildProfileBootstrapBundle,
   deriveBlockedMcpServers,
   materializeProfileBootstrapBundle,
+  materializeProfileBootstrapBundleFromSync,
   resetBootstrapCacheForTests,
   storeProfileBootstrapBundle,
 } from "../src/index.js";
@@ -152,8 +153,44 @@ describe("dsh-bootstrap-plugin materialize", () => {
     );
   });
 
-  it("dev degrade falls back to cached bundle", async () => {
+  it("dev degrade falls back to default bundle", async () => {
     process.env.DIY_BOOTSTRAP_DEV_DEGRADE = "true";
+    const bundle = await materializeProfileBootstrapBundle({
+      controlPlaneUrl: "http://cp.test",
+      profileId: "prof-1" as import("@diy-agent/domain").ProfileId,
+      profileVersionId: "ver-1" as import("@diy-agent/domain").ProfileVersionId,
+      workspaceId: "ws-1" as import("@diy-agent/domain").WorkspaceId,
+      tenantId: "t-1" as import("@diy-agent/domain").TenantId,
+      fetchImpl: async () => new Response("fail", { status: 503 }),
+    });
+    assert.ok(bundle.policy);
+  });
+
+  it("materializes bundle from profile-sync payload", () => {
+    const bundle = materializeProfileBootstrapBundleFromSync({
+      profileId: "prof-1" as import("@diy-agent/domain").ProfileId,
+      versionId: "ver-1" as import("@diy-agent/domain").ProfileVersionId,
+      workspaceId: "ws-1" as import("@diy-agent/domain").WorkspaceId,
+      tenantId: "t-1" as import("@diy-agent/domain").TenantId,
+      snapshot: { kbConfig: { internal: { enabled: true } } },
+      policy: defaultWorkspaceAccessPolicy("ws-1" as import("@diy-agent/domain").WorkspaceId),
+      credentialRefIds: ["vault://ref-1"],
+      mcpCatalog: [
+        {
+          serverName: "pending-srv",
+          tenantId: "t-1" as import("@diy-agent/domain").TenantId,
+          transport: "stdio",
+          defaultSensitivity: "normal",
+          approvalStatus: "pending",
+          createdAt: new Date(),
+        },
+      ],
+    });
+    assert.equal(bundle.credentialRefIds[0], "vault://ref-1");
+    assert.deepEqual(bundle.blockedMcpServers, ["pending-srv"]);
+  });
+
+  it("uses cached bundle when Control Plane pull fails after profile-sync materialize", async () => {
     storeProfileBootstrapBundle(
       buildProfileBootstrapBundle({
         profileId: "prof-1" as import("@diy-agent/domain").ProfileId,
@@ -163,6 +200,7 @@ describe("dsh-bootstrap-plugin materialize", () => {
         snapshot: { kbConfig: { internal: { enabled: true } } },
       }),
     );
+    delete process.env.DIY_BOOTSTRAP_DEV_DEGRADE;
 
     const bundle = await materializeProfileBootstrapBundle({
       controlPlaneUrl: "http://cp.test",
@@ -174,6 +212,22 @@ describe("dsh-bootstrap-plugin materialize", () => {
     });
 
     assert.equal(bundle.kbConfig?.internal?.enabled, true);
+  });
+
+  it("offline mode requires cached bootstrap bundle", async () => {
+    delete process.env.DIY_BOOTSTRAP_DEV_DEGRADE;
+    await assert.rejects(
+      () =>
+        materializeProfileBootstrapBundle({
+          controlPlaneUrl: "http://cp.test",
+          profileId: "prof-1" as import("@diy-agent/domain").ProfileId,
+          profileVersionId: "ver-1" as import("@diy-agent/domain").ProfileVersionId,
+          workspaceId: "ws-1" as import("@diy-agent/domain").WorkspaceId,
+          tenantId: "t-1" as import("@diy-agent/domain").TenantId,
+          offline: true,
+        }),
+      /bootstrap_unavailable:offline_cache_miss/,
+    );
   });
 });
 

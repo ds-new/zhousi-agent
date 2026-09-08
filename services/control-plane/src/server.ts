@@ -295,17 +295,28 @@ export function createControlPlaneServer(
       const pinned = await store.pinProfile(profileId, versionId);
       if (!pinned) return json(res, 404, { error: "version_not_found" });
       const pinnedVersion = await store.getProfileVersion(profileId, versionId);
+      const tenantId = body.tenantId as TenantId;
+      const policy =
+        (await store.getWorkspacePolicy(profile.workspaceId)) ??
+        defaultWorkspaceAccessPolicy(profile.workspaceId);
+      const mcpCatalog = await store.listMcp(tenantId);
+      const credentialRefIds = collectCredentialRefIds(profile);
       await store.appendAudit({
-        tenantId: body.tenantId as import("@diy-agent/domain").Tenant["id"],
+        tenantId,
         workspaceId: profile.workspaceId,
         action: "profile.pinned",
         metadata: { profileId, versionId },
       });
-      await fireWebhooks(body.tenantId as string, "profile.pinned", {
+      await fireWebhooks(tenantId, "profile.pinned", {
         profileId,
         versionId,
+        workspaceId: profile.workspaceId,
+        tenantId,
         snapshot: pinnedVersion?.snapshot,
         pinnedAt: new Date().toISOString(),
+        policy,
+        credentialRefIds,
+        mcpCatalog,
       });
       return json(res, 200, { profile: pinned, gate });
     }

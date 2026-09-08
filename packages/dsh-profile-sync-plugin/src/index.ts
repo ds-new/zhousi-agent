@@ -3,10 +3,20 @@
  */
 import {
   PROFILE_SYNC_RECONCILE_INTERVAL_MS,
+  defaultWorkspaceAccessPolicy,
+  type AccessPolicy,
+  type McpCatalogEntry,
   type ProfileSyncEntry,
   type ProfileId,
   type ProfileVersionId,
+  type TenantId,
+  type WorkspaceId,
 } from "@diy-agent/domain";
+import {
+  getProfileBootstrapBundle,
+  materializeProfileBootstrapBundleFromSync,
+  storeProfileBootstrapBundle,
+} from "@diy-agent/dsh-bootstrap-plugin";
 
 export const name = "@diy-agent/dsh-profile-sync-plugin";
 export const inject = ["sessions"] as const;
@@ -24,20 +34,49 @@ export function profileSyncCacheKey(profileId: string, versionId: string): strin
   return `${profileId}:${versionId}`;
 }
 
-export function handleProfilePinnedWebhook(payload: {
+export interface ProfilePinnedWebhookPayload {
   profileId: string;
   versionId: string;
+  workspaceId: string;
+  tenantId: string;
   snapshot?: Record<string, unknown>;
   pinnedAt?: string;
-}): ProfileSyncEntry | null {
+  policy?: AccessPolicy;
+  credentialRefIds?: string[];
+  mcpCatalog?: McpCatalogEntry[];
+}
+
+function normalizeProfileSyncEntry(payload: ProfilePinnedWebhookPayload): ProfileSyncEntry | null {
   if (!payload.snapshot) return null;
-  const entry: ProfileSyncEntry = {
+  const workspaceId = payload.workspaceId as WorkspaceId;
+  return {
     profileId: payload.profileId as ProfileId,
     versionId: payload.versionId as ProfileVersionId,
+    workspaceId,
+    tenantId: payload.tenantId as TenantId,
     snapshot: payload.snapshot,
+    policy: payload.policy ?? defaultWorkspaceAccessPolicy(workspaceId),
+    credentialRefIds: payload.credentialRefIds ?? [],
+    mcpCatalog: (payload.mcpCatalog ?? []).map((entry) => ({
+      ...entry,
+      createdAt:
+        entry.createdAt instanceof Date ? entry.createdAt : new Date(String(entry.createdAt)),
+    })),
     pinnedAt: payload.pinnedAt ? new Date(payload.pinnedAt) : new Date(),
   };
+}
+
+export function materializeBootstrapFromProfileSyncEntry(entry: ProfileSyncEntry): void {
+  storeProfileBootstrapBundle(materializeProfileBootstrapBundleFromSync(entry));
+}
+
+export function handleProfilePinnedWebhook(
+  payload: ProfilePinnedWebhookPayload,
+): ProfileSyncEntry | null {
+  const entry = normalizeProfileSyncEntry(payload);
+  if (!entry) return null;
   cache.set(profileSyncCacheKey(entry.profileId, entry.versionId), entry);
+  materializeBootstrapFromProfileSyncEntry(entry);
   return entry;
 }
 
@@ -59,10 +98,19 @@ export async function reconcilePinnedProfiles(
   }
   const body = (await res.json()) as { profiles: ProfileSyncEntry[] };
   for (const entry of body.profiles ?? []) {
-    cache.set(profileSyncCacheKey(entry.profileId, entry.versionId), {
+    const normalized: ProfileSyncEntry = {
       ...entry,
       pinnedAt: new Date(entry.pinnedAt),
-    });
+      mcpCatalog: (entry.mcpCatalog ?? []).map((catalogEntry) => ({
+        ...catalogEntry,
+        createdAt:
+          catalogEntry.createdAt instanceof Date
+            ? catalogEntry.createdAt
+            : new Date(String(catalogEntry.createdAt)),
+      })),
+    };
+    cache.set(profileSyncCacheKey(normalized.profileId, normalized.versionId), normalized);
+    materializeBootstrapFromProfileSyncEntry(normalized);
   }
   return body.profiles ?? [];
 }
@@ -73,7 +121,7 @@ export function assertOfflineSessionAllowed(
   opts: { offline: boolean; enterpriseMode: boolean },
 ): void {
   if (!opts.enterpriseMode || !opts.offline) return;
-  if (!getCachedProfileSync(profileId, versionId)) {
+  if (!getProfileBootstrapBundle(profileId, versionId)) {
     throw new Error("profile_sync_cache_miss_offline");
   }
 }

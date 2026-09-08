@@ -20,7 +20,7 @@ paths:
       summary: Pull pinned Profile snapshot for Data Plane sync
   /profiles/{profileId}/pin:
     post:
-      summary: Pin Profile version after Pin Gate (fires profile.pinned webhook with snapshot)
+      summary: Pin Profile version after Pin Gate (fires profile.pinned webhook with snapshot, policy, credentialRefIds, mcpCatalog)
   /profiles/{profileId}/eval/run:
     post:
       summary: Run Golden Task evaluation and return Pin Gate metrics
@@ -29,7 +29,7 @@ paths:
       summary: List persisted profile evaluation runs
   /tenants/{tenantId}/profile-sync:
     get:
-      summary: List pinned profile snapshots for Enterprise Data Plane reconcile
+      summary: List pinned profile bootstrap bundles for Enterprise Data Plane reconcile (policy, credentialRefIds, mcpCatalog)
   /sessions:
     post:
       summary: Create Session with scoped token

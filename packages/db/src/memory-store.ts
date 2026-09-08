@@ -1,6 +1,7 @@
 import {
   DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
   SESSION_TOKEN_TTL_MS,
+  collectCredentialRefIds,
   defaultWorkspaceAccessPolicy,
   isTraceExpired,
   isL1EvolutionSkillTargetAllowed,
@@ -481,15 +482,24 @@ export class MemoryStore implements ControlPlaneStore {
     const workspaceIds = new Set(
       [...this.workspaces.values()].filter((ws) => ws.tenantId === tenantId).map((ws) => ws.id),
     );
+    const mcpCatalog = await this.listMcp(tenantId);
     const entries: ProfileSyncEntry[] = [];
     for (const profile of this.profiles.values()) {
       if (!workspaceIds.has(profile.workspaceId) || !profile.pinnedVersionId) continue;
       const version = this.profileVersions.get(profile.pinnedVersionId);
       if (!version) continue;
+      const policy =
+        (await this.getWorkspacePolicy(profile.workspaceId)) ??
+        defaultWorkspaceAccessPolicy(profile.workspaceId);
       entries.push({
         profileId: profile.id,
         versionId: profile.pinnedVersionId,
+        workspaceId: profile.workspaceId,
+        tenantId,
         snapshot: version.snapshot as unknown as Record<string, unknown>,
+        policy,
+        credentialRefIds: collectCredentialRefIds(profile),
+        mcpCatalog,
         pinnedAt: version.createdAt,
       });
     }

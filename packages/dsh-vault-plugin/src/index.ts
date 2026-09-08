@@ -3,7 +3,7 @@
  * Control Plane stores refs only; plaintext never leaves Data Plane.
  */
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { isL3ProtectedMutationPath } from "@diy-agent/domain";
+import { isL3ProtectedMutationPath, type McpBinding } from "@diy-agent/domain";
 
 export const name = "@diy-agent/dsh-vault-plugin";
 export const inject = ["tools"] as const;
@@ -12,6 +12,19 @@ export interface EncryptedVaultBlob {
   iv: string;
   tag: string;
   data: string;
+}
+
+export interface ToolCallContext {
+  toolName: string;
+  binding?: McpBinding;
+  workspaceId?: string;
+  env?: Record<string, string>;
+}
+
+export interface VaultPluginConfig {
+  kmsKeyMaterial?: string;
+  tenantId?: string;
+  vaultEncBlob?: string;
 }
 
 export function deriveVaultKey(kmsKeyMaterial: string, tenantId: string): Buffer {
@@ -80,6 +93,26 @@ export function assertEvolutionMutationAllowed(mutationPath: string): void {
   }
 }
 
-export function apply(_ctx: unknown, config: { kmsKeyMaterial?: string; tenantId?: string }): void {
-  void config;
+export function apply(
+  ctx: {
+    effect: (fn: () => void) => void;
+    on: (event: string, handler: (...args: unknown[]) => void) => void;
+  },
+  config: VaultPluginConfig = {},
+): void {
+  const kmsKeyMaterial = config.kmsKeyMaterial ?? process.env.DIY_KMS_KEY_MATERIAL;
+  const tenantId = config.tenantId ?? process.env.DIY_TENANT_ID;
+  const vaultEncBlob = config.vaultEncBlob ?? process.env.DIY_VAULT_ENC_BLOB;
+  if (!kmsKeyMaterial || !tenantId || !vaultEncBlob) return;
+
+  const key = deriveVaultKey(kmsKeyMaterial, tenantId);
+  const vault = decryptVault(vaultEncBlob, key);
+
+  ctx.effect(() => {
+    ctx.on("tool/before-call", (...args: unknown[]) => {
+      const call = args[0] as ToolCallContext | undefined;
+      if (!call?.binding?.envRef) return;
+      call.env = { ...call.env, ...injectMcpEnv(call.binding.envRef, vault) };
+    });
+  });
 }

@@ -36,6 +36,18 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
+interface WebhookProfilePinnedPayload {
+  profileId?: string;
+  versionId?: string;
+  workspaceId?: string;
+  tenantId?: string;
+  snapshot?: Record<string, unknown>;
+  pinnedAt?: string;
+  policy?: import("@diy-agent/domain").AccessPolicy;
+  credentialRefIds?: string[];
+  mcpCatalog?: import("@diy-agent/domain").McpCatalogEntry[];
+}
+
 export function createDataPlaneServer(options: DataPlaneServerOptions = {}): DataPlaneServer {
   const internalToken = options.internalToken ?? process.env.DIY_DATA_PLANE_INTERNAL_TOKEN;
   const kbRuntime = options.kbRuntime ?? createKbRuntime(options.kbRuntimeDeps);
@@ -64,23 +76,28 @@ export function createDataPlaneServer(options: DataPlaneServerOptions = {}): Dat
       req.on("end", () => {
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as {
           event?: string;
-          payload?: {
-            profileId?: string;
-            versionId?: string;
-            snapshot?: Record<string, unknown>;
-            pinnedAt?: string;
-          };
+          payload?: WebhookProfilePinnedPayload;
           profileId?: string;
           versionId?: string;
           snapshot?: Record<string, unknown>;
           pinnedAt?: string;
+          workspaceId?: string;
+          tenantId?: string;
+          policy?: import("@diy-agent/domain").AccessPolicy;
+          credentialRefIds?: string[];
+          mcpCatalog?: import("@diy-agent/domain").McpCatalogEntry[];
         };
-        const payload = body.payload ?? body;
+        const payload = (body.payload ?? body) as WebhookProfilePinnedPayload;
         const entry = handleProfilePinnedWebhook({
           profileId: String(payload.profileId ?? ""),
           versionId: String(payload.versionId ?? ""),
+          workspaceId: String(payload.workspaceId ?? ""),
+          tenantId: String(payload.tenantId ?? ""),
           snapshot: payload.snapshot,
           pinnedAt: payload.pinnedAt,
+          policy: payload.policy,
+          credentialRefIds: payload.credentialRefIds,
+          mcpCatalog: payload.mcpCatalog,
         });
         if (!entry) return respond(400, { error: "missing_snapshot" });
         respond(201, entry);

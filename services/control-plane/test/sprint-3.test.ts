@@ -55,6 +55,9 @@ describe("Sprint 3 — enterprise vault sync, dedicated isolation, profile-sync"
       assert.equal(profiles.length, 1);
       assert.equal(profiles[0]!.profileId, profileId);
       assert.equal((profiles[0]!.snapshot as Record<string, unknown>).name, "enterprise-bot");
+      assert.ok(profiles[0]!.policy);
+      assert.ok(Array.isArray(profiles[0]!.credentialRefIds));
+      assert.ok(Array.isArray(profiles[0]!.mcpCatalog));
     } finally {
       await cp.close();
     }
@@ -96,11 +99,14 @@ describe("Sprint 3 — enterprise vault sync, dedicated isolation, profile-sync"
 
       const pinPayload = payloads.find((p) => p.event === "profile.pinned");
       assert.ok(pinPayload);
-      const snapshot = (pinPayload!.payload as Record<string, unknown>).snapshot as Record<
-        string,
-        unknown
-      >;
+      const payload = pinPayload!.payload as Record<string, unknown>;
+      const snapshot = payload.snapshot as Record<string, unknown>;
       assert.equal(snapshot.name, "sync-bot");
+      assert.ok(payload.policy);
+      assert.ok(Array.isArray(payload.credentialRefIds));
+      assert.ok(Array.isArray(payload.mcpCatalog));
+      assert.ok(payload.workspaceId);
+      assert.ok(payload.tenantId);
     } finally {
       await cp.close();
     }
