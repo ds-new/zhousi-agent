@@ -28,6 +28,7 @@ export {
   type KbSearchHttpBody,
 } from "./kb-http.js";
 export {
+  getKbConfigFromBundle,
   resolveKbConfigFromSnapshot,
   resolveKbConfigForSession,
   type KbSessionContext,

@@ -15,7 +15,7 @@ Agents also could not search KB inside the turn loop without cross-plane calls, 
 2. **Expose Data Plane HTTP** `POST /kb/search` (Phase A) and `POST /kb/documents` (ingest forwarding, Phase A).
 3. **Register `kb_search` tool** in the Standard DSH bundle (`inject: ["tools"]`); default `KnowledgeBaseConfig.retrievalMode` is `"tool"`.
 4. **Control Plane transition**: deprecate `/kb/search` and proxy to Data Plane; keep `/kb/documents` as proxy until Phase B adds **Kb Document Registry** metadata-only entries.
-5. **Snapshot config**: resolve `kbConfig` from profile-sync cache (Enterprise) then tenant-plugin cache; fail with `kb_config_unavailable` on miss.
+5. **Snapshot config**: resolve `kbConfig` from `ProfileBootstrapBundle` (Session Bootstrap); fail with `kb_config_unavailable` on miss. Enterprise profile-sync webhooks materialize the same bundle (ADR-0002).
 6. **Auth**: optional `DIY_DATA_PLANE_INTERNAL_TOKEN` for CP→DP HTTP (required in production Helm).
 7. **Postgres**: Data Plane reads `DIY_DATABASE_URL` + `DIY_TENANT_DB_SCHEMA` or `DIY_DEDICATED_DATABASE_URL`; fallback to in-memory store for tests.
 

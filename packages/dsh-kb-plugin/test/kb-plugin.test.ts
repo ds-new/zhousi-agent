@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it, beforeEach } from "node:test";
 import { resetInternalIndexForTests } from "@diy-agent/kb-rag";
-import { storeProfileBootstrapBundle, buildProfileBootstrapBundle, resetBootstrapCacheForTests } from "@diy-agent/dsh-bootstrap-plugin";
-import { defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
-import { handleProfilePinnedWebhook } from "@diy-agent/dsh-profile-sync-plugin";
+import {
+  storeProfileBootstrapBundle,
+  buildProfileBootstrapBundle,
+  resetBootstrapCacheForTests,
+} from "@diy-agent/dsh-bootstrap-plugin";
 import {
   createKbRuntime,
+  getKbConfigFromBundle,
   registerKbSearchTool,
   resetKbPluginForTests,
   resetKbRuntimeForTests,
@@ -20,47 +23,13 @@ describe("dsh-kb-plugin snapshot resolver", () => {
     resetBootstrapCacheForTests();
   });
 
-  it("prefers profile-sync cache over bootstrap bundle cache", () => {
+  it("reads kbConfig from ProfileBootstrapBundle", () => {
     storeProfileBootstrapBundle(
       buildProfileBootstrapBundle({
         profileId: "prof-1" as import("@diy-agent/domain").ProfileId,
         profileVersionId: "ver-1" as import("@diy-agent/domain").ProfileVersionId,
         workspaceId: "ws-1" as import("@diy-agent/domain").WorkspaceId,
         tenantId: "t-1" as import("@diy-agent/domain").TenantId,
-        snapshot: { kbConfig: { internal: { enabled: true } } },
-      }),
-    );
-    handleProfilePinnedWebhook({
-      profileId: "prof-1",
-      versionId: "ver-1",
-      workspaceId: "ws-1",
-      tenantId: "t-1",
-      snapshot: {
-        kbConfig: {
-          internal: { enabled: true },
-          externalMcp: {
-            serverName: "sync-search",
-            transport: "stdio",
-            sensitivity: "readonly",
-          },
-        },
-      },
-      policy: defaultWorkspaceAccessPolicy("ws-1" as import("@diy-agent/domain").WorkspaceId),
-      credentialRefIds: [],
-      mcpCatalog: [],
-    });
-
-    const config = resolveKbConfigFromSnapshot("prof-1", "ver-1");
-    assert.equal(config.externalMcp?.serverName, "sync-search");
-  });
-
-  it("reads kbConfig from bootstrap bundle when profile-sync misses", () => {
-    storeProfileBootstrapBundle(
-      buildProfileBootstrapBundle({
-        profileId: "prof-2" as import("@diy-agent/domain").ProfileId,
-        profileVersionId: "ver-2" as import("@diy-agent/domain").ProfileVersionId,
-        workspaceId: "ws-2" as import("@diy-agent/domain").WorkspaceId,
-        tenantId: "t-2" as import("@diy-agent/domain").TenantId,
         snapshot: {
           kbConfig: {
             internal: { enabled: true },
@@ -74,12 +43,27 @@ describe("dsh-kb-plugin snapshot resolver", () => {
       }),
     );
 
-    const config = resolveKbConfigFromSnapshot("prof-2", "ver-2");
+    const config = getKbConfigFromBundle("prof-1", "ver-1");
     assert.equal(config.externalMcp?.serverName, "bundle-search");
   });
 
-  it("throws kb_config_unavailable when caches miss", () => {
-    assert.throws(() => resolveKbConfigFromSnapshot("missing", "ver-1"), /kb_config_unavailable/);
+  it("resolveKbConfigFromSnapshot delegates to getKbConfigFromBundle", () => {
+    storeProfileBootstrapBundle(
+      buildProfileBootstrapBundle({
+        profileId: "prof-2" as import("@diy-agent/domain").ProfileId,
+        profileVersionId: "ver-2" as import("@diy-agent/domain").ProfileVersionId,
+        workspaceId: "ws-2" as import("@diy-agent/domain").WorkspaceId,
+        tenantId: "t-2" as import("@diy-agent/domain").TenantId,
+        snapshot: { kbConfig: { internal: { enabled: true } } },
+      }),
+    );
+
+    const config = resolveKbConfigFromSnapshot("prof-2", "ver-2");
+    assert.equal(config.internal?.enabled, true);
+  });
+
+  it("throws kb_config_unavailable when bootstrap bundle misses", () => {
+    assert.throws(() => getKbConfigFromBundle("missing", "ver-1"), /kb_config_unavailable/);
   });
 });
 
