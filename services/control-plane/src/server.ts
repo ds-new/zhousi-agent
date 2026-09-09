@@ -10,7 +10,7 @@ import {
   type QuotaCheckResult,
 } from "@diy-agent/db";
 import type { AgentProfile, GovernanceTier, ProfileId, TenantId } from "@diy-agent/domain";
-import { defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
+import { DEFAULT_EVOLUTION_SIGNAL_THRESHOLD, defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
 import {
   invokeEvolutionService,
   scoreProfileTask,
@@ -27,6 +27,7 @@ import {
   type ServiceAccountMode,
 } from "./auth-middleware.js";
 import { collectCredentialRefIds, runProfileEvaluation } from "./profile-eval.js";
+import { executeEvolutionPipeline } from "./evolution-orchestrator.js";
 import { proxyKbDocumentIngest, proxyKbSearch, type DataPlaneFetch } from "./kb-proxy.js";
 import { buildKbIngestResponse, computeKbContentHash } from "./kb-registry.js";
 import type { JwksOidcConfig } from "@diy-agent/auth";
@@ -236,10 +237,49 @@ export function createControlPlaneServer(
       if (!versionId) return json(res, 404, { error: "version_not_found" });
       const evaluation = await runProfileEvaluation(store, profileId, versionId);
       if (!evaluation) return json(res, 404, { error: "profile_not_found" });
+
+      let evolutionRun: import("@diy-agent/domain").EvolutionRun | undefined;
+      const tenant = await store.getTenantForProfile(profileId);
+      const tenantId = (body.tenantId as TenantId | undefined) ?? tenant?.id;
+      if (
+        tenantId &&
+        !evaluation.gate.passed &&
+        evaluation.gate.passRate < DEFAULT_EVOLUTION_SIGNAL_THRESHOLD
+      ) {
+        const signalResult = await store.triggerEvolutionSignal({
+          profileId,
+          tenantId,
+          passRate: evaluation.gate.passRate,
+        });
+        if (signalResult && !("skipped" in signalResult)) {
+          try {
+            const pipeline = await executeEvolutionPipeline(
+              store,
+              signalResult,
+              tenantId,
+              evolve,
+            );
+            if (pipeline?.awaitingReview) {
+              await fireWebhooks(tenantId, "evolution.awaiting_review", {
+                runId: pipeline.run.id,
+              });
+            }
+            evolutionRun = pipeline?.run;
+          } catch (err) {
+            if (
+              !(err instanceof Error && err.message === "evolution_service_unavailable")
+            ) {
+              throw err;
+            }
+          }
+        }
+      }
+
       return json(res, 200, {
         results: evaluation.results,
         gate: evaluation.gate,
         evalRun: evaluation.evalRun,
+        evolutionRun,
       });
     }
 
@@ -726,31 +766,19 @@ export function createControlPlaneServer(
         });
         if (!run) return json(res, 400, { error: "invalid_profile" });
         const profile = await store.getProfile(body.profileId as ProfileId);
-        const version = await store.getLatestProfileVersion(run.profileId);
-        const traces = await store.listTraces(run.profileId, 50);
-        const goldenTasks = await store.listGoldenTasks(run.profileId);
-        const svc = await evolve({
-          profileId: run.profileId,
-          baseVersionId: run.baseVersionId,
-          tier: run.tier,
-          target: run.target,
-          snapshot: version?.snapshot,
-          evalTasks: goldenTasks,
-          traces,
-        });
-        run.status = svc.status;
-        if (svc.candidateVersionId) {
-          run.candidateVersionId =
-            svc.candidateVersionId as import("@diy-agent/domain").ProfileVersionId;
-        }
-        run.evalScoreDelta = svc.evalScoreDelta;
-        if (svc.requiresReview) run.status = "awaiting_review";
-        if (run.status === "awaiting_review") {
+        const pipeline = await executeEvolutionPipeline(
+          store,
+          run,
+          body.tenantId as TenantId,
+          evolve,
+        );
+        if (!pipeline) return json(res, 400, { error: "invalid_profile" });
+        if (pipeline.awaitingReview) {
           await fireWebhooks(body.tenantId as string, "evolution.awaiting_review", {
-            runId: run.id,
+            runId: pipeline.run.id,
           });
         }
-        return json(res, 201, { run, profile: profile?.governanceTier });
+        return json(res, 201, { run: pipeline.run, profile: profile?.governanceTier });
       } catch (err) {
         if (err instanceof Error && err.message === "evolution_tier_forbidden") {
           return json(res, 403, { error: "evolution_tier_forbidden" });
@@ -762,6 +790,9 @@ export function createControlPlaneServer(
           return json(res, 400, { error: "evolution_skill_id_required" });
         }
         if (err instanceof Error && err.message.startsWith("evolution_http_")) {
+          return json(res, 502, { error: "evolution_service_unavailable" });
+        }
+        if (err instanceof Error && err.message === "evolution_service_unavailable") {
           return json(res, 502, { error: "evolution_service_unavailable" });
         }
         throw err;
@@ -784,22 +815,24 @@ export function createControlPlaneServer(
       }
       const run = result as import("@diy-agent/domain").EvolutionRun;
       try {
-        const version = await store.getLatestProfileVersion(run.profileId);
-        const traces = await store.listTraces(run.profileId, 50);
-        const goldenTasks = await store.listGoldenTasks(run.profileId);
-        const svc = await evolve({
-          profileId: run.profileId,
-          baseVersionId: run.baseVersionId,
-          tier: run.tier,
-          target: run.target,
-          snapshot: version?.snapshot,
-          evalTasks: goldenTasks,
-          traces,
-        });
-        run.status = svc.status;
-        return json(res, 201, { run, signal: true });
+        const pipeline = await executeEvolutionPipeline(
+          store,
+          run,
+          body.tenantId as TenantId,
+          evolve,
+        );
+        if (!pipeline) return json(res, 400, { error: "invalid_profile" });
+        if (pipeline.awaitingReview) {
+          await fireWebhooks(body.tenantId as string, "evolution.awaiting_review", {
+            runId: pipeline.run.id,
+          });
+        }
+        return json(res, 201, { run: pipeline.run, signal: true });
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("evolution_http_")) {
+          return json(res, 502, { error: "evolution_service_unavailable" });
+        }
+        if (err instanceof Error && err.message === "evolution_service_unavailable") {
           return json(res, 502, { error: "evolution_service_unavailable" });
         }
         throw err;

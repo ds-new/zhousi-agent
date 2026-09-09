@@ -162,6 +162,7 @@ export interface McpBinding {
   args?: string[];
   url?: string;
   envRef?: Record<string, string>;
+  description?: string;
   warmPool?: boolean;
   poolScope?: McpPoolScope;
   sensitivity?: "normal" | "high" | "readonly";
@@ -257,6 +258,7 @@ export interface EvolutionRun {
   target: "skill" | "prompt" | "mcp_description";
   status: "running" | "completed" | "failed" | "awaiting_review" | "rejected";
   evalScoreDelta?: number;
+  mutations?: import("./evolution-mutations.js").EvolutionMutation[];
   createdAt: Date;
 }
 
@@ -398,3 +400,8 @@ export function shouldWarmPool(binding: McpBinding): boolean {
   if (binding.sensitivity === "high") return false;
   return binding.warmPool ?? true;
 }
+
+export {
+  applyEvolutionMutations,
+  type EvolutionMutation,
+} from "./evolution-mutations.js";

@@ -5,6 +5,7 @@ import type {
   AuditEvent,
   CredentialRefRecord,
   EvalTask,
+  EvolutionMutation,
   EvolutionRun,
   GovernanceTier,
   KbDocumentRegistryEntry,
@@ -84,6 +85,15 @@ export interface TriggerEvolutionSignalInput {
   tenantId: Tenant["id"];
   passRate: number;
   threshold?: number;
+}
+
+export interface FinalizeEvolutionInput {
+  runId: string;
+  tenantId: Tenant["id"];
+  candidateVersionId?: AgentProfileVersion["id"];
+  status: EvolutionRun["status"];
+  evalScoreDelta?: number;
+  mutations?: EvolutionMutation[];
 }
 
 export interface EvalTraceRecord {
@@ -178,6 +188,7 @@ export interface ControlPlaneStore {
   ): Promise<EvolutionRun | { skipped: true; reason: string }>;
   approveEvolutionRun(input: ApproveEvolutionInput): Promise<EvolutionRun | null>;
   rejectEvolutionRun(input: RejectEvolutionInput): Promise<EvolutionRun | null>;
+  finalizeEvolutionFromService(input: FinalizeEvolutionInput): Promise<EvolutionRun | null>;
   createApiKey(tenantId: Tenant["id"], name: string): Promise<{ key: string; record: ApiKeyRecord }>;
   listApiKeys(tenantId: Tenant["id"]): Promise<ApiKeyRecord[]>;
   listAllApiKeys(): Promise<ApiKeyRecord[]>;

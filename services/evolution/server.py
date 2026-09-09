@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evolution Service sidecar — trace-aware GEPA-style mutations (Sprint 2a)."""
+"""Evolution Service sidecar — trace-aware GEPA-style mutations (Hermes loop)."""
 from __future__ import annotations
 
 import json
@@ -20,6 +20,15 @@ def analyze_traces(traces: list[dict[str, Any]]) -> tuple[list[str], int]:
                 if name:
                     failed_tools.append(str(name))
     return failed_tools, empty_outputs
+
+
+def snapshot_system_prompt(body: dict[str, Any]) -> str:
+    snapshot = body.get("snapshot") or {}
+    if isinstance(snapshot, dict):
+        prompt = snapshot.get("systemPrompt")
+        if isinstance(prompt, str) and prompt:
+            return prompt
+    return "be concise"
 
 
 def propose_mutations(body: dict[str, Any]) -> list[dict[str, Any]]:
@@ -52,12 +61,13 @@ def propose_mutations(body: dict[str, Any]) -> list[dict[str, Any]]:
                 "tier": tier,
             }
         )
-    elif empty_outputs:
+    elif target == "prompt" or empty_outputs:
+        before = snapshot_system_prompt(body)
         mutations.append(
             {
                 "path": "prompt/system",
-                "before": "be concise",
-                "after": "always provide a substantive answer even when uncertain",
+                "before": before,
+                "after": f"{before}\n\nAlways provide a substantive answer even when uncertain.",
                 "tier": tier,
             }
         )

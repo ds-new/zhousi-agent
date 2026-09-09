@@ -13,6 +13,7 @@ export type {
   CreateTenantInput,
   CreateWorkspaceInput,
   ApproveEvolutionInput,
+  FinalizeEvolutionInput,
   RejectEvolutionInput,
   EvalTraceRecord,
   QuotaCheckResult,

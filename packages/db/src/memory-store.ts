@@ -1,6 +1,7 @@
 import {
   DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
   SESSION_TOKEN_TTL_MS,
+  applyEvolutionMutations,
   collectCredentialRefIds,
   defaultWorkspaceAccessPolicy,
   isTraceExpired,
@@ -28,6 +29,7 @@ import {
 import type {
   ControlPlaneStore,
   CreateEvolutionRunInput,
+  FinalizeEvolutionInput,
   ApproveEvolutionInput,
   RejectEvolutionInput,
   CreateProfileInput,
@@ -596,6 +598,68 @@ export class MemoryStore implements ControlPlaneStore {
     return run!;
   }
 
+  async finalizeEvolutionFromService(input: FinalizeEvolutionInput): Promise<EvolutionRun | null> {
+    const run = this.evolutionRuns.get(input.runId);
+    if (!run) return null;
+    const profile = this.profiles.get(run.profileId);
+    if (!profile) return null;
+    const ws = this.workspaces.get(profile.workspaceId);
+    if (!ws || ws.tenantId !== input.tenantId) return null;
+
+    run.evalScoreDelta = input.evalScoreDelta;
+    run.mutations = input.mutations;
+
+    if (input.status === "failed") {
+      run.status = "failed";
+      return run;
+    }
+
+    const baseVersion = this.profileVersions.get(run.baseVersionId);
+    if (!baseVersion) return null;
+
+    let snapshot = structuredClone(baseVersion.snapshot);
+    if (input.mutations?.length) {
+      snapshot = applyEvolutionMutations(snapshot, input.mutations);
+    }
+
+    const candidateId =
+      input.candidateVersionId ??
+      run.candidateVersionId ??
+      (crypto.randomUUID() as AgentProfileVersion["id"]);
+
+    if (!this.profileVersions.has(candidateId)) {
+      this.profileVersions.set(candidateId, {
+        id: candidateId,
+        profileId: profile.id,
+        version: baseVersion.version + 1,
+        snapshot,
+        createdAt: new Date(),
+        approvalStatus: run.tier === "L2" ? "pending" : "approved",
+      });
+    }
+
+    run.candidateVersionId = candidateId;
+
+    if (run.tier === "L2" || input.status === "awaiting_review") {
+      run.status = "awaiting_review";
+      return run;
+    }
+
+    run.status = "completed";
+    await this.appendAudit({
+      tenantId: input.tenantId,
+      workspaceId: profile.workspaceId,
+      action: "evolution.applied",
+      metadata: {
+        runId: run.id,
+        candidateVersionId: candidateId,
+        tier: run.tier,
+        trigger: run.trigger,
+      },
+    });
+    return run;
+  }
+
   async approveEvolutionRun(input: ApproveEvolutionInput): Promise<EvolutionRun | null> {
     const run = this.evolutionRuns.get(input.runId);
     if (!run || run.status !== "awaiting_review") return null;
@@ -613,14 +677,21 @@ export class MemoryStore implements ControlPlaneStore {
       (crypto.randomUUID() as AgentProfileVersion["id"]);
 
     if (!this.profileVersions.has(candidateId)) {
+      let snapshot = structuredClone(baseVersion.snapshot);
+      if (run.mutations?.length) {
+        snapshot = applyEvolutionMutations(snapshot, run.mutations);
+      }
       this.profileVersions.set(candidateId, {
         id: candidateId,
         profileId: profile.id,
         version: baseVersion.version + 1,
-        snapshot: structuredClone(baseVersion.snapshot),
+        snapshot,
         createdAt: new Date(),
         approvalStatus: "approved",
       });
+    } else {
+      const candidate = this.profileVersions.get(candidateId)!;
+      candidate.approvalStatus = "approved";
     }
 
     run.candidateVersionId = candidateId;
