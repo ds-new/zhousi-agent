@@ -19,7 +19,6 @@ export async function tryAutoPinAfterEvolution(
 ): Promise<EvolutionClosureResult | null> {
   if (input.evolutionRun.status !== "completed") return null;
   if (!input.evolutionRun.candidateVersionId) return null;
-  if (input.evolutionRun.tier === "L2") return null;
 
   const postEvolutionEval = await runProfileEvaluation(
     store,

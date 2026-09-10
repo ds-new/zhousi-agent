@@ -258,6 +258,10 @@ export interface EvolutionRun {
   target: "skill" | "prompt" | "mcp_description";
   status: "running" | "completed" | "failed" | "awaiting_review" | "rejected";
   evalScoreDelta?: number;
+  gepaRounds?: Array<{ round: number; passRate: number }>;
+  gepaBestRound?: number;
+  gepaBaselinePassRate?: number;
+  gepaFinalPassRate?: number;
   mutations?: import("./evolution-mutations.js").EvolutionMutation[];
   createdAt: Date;
 }

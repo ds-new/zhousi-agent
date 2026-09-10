@@ -93,6 +93,10 @@ export interface FinalizeEvolutionInput {
   candidateVersionId?: AgentProfileVersion["id"];
   status: EvolutionRun["status"];
   evalScoreDelta?: number;
+  gepaRounds?: EvolutionRun["gepaRounds"];
+  gepaBestRound?: number;
+  gepaBaselinePassRate?: number;
+  gepaFinalPassRate?: number;
   mutations?: EvolutionMutation[];
 }
 

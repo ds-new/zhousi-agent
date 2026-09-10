@@ -53,6 +53,10 @@ export async function executeEvolutionPipeline(
             ? "awaiting_review"
             : "completed",
     evalScoreDelta: svc.evalScoreDelta,
+    gepaRounds: svc.gepaRounds,
+    gepaBestRound: svc.gepaBestRound,
+    gepaBaselinePassRate: svc.gepaBaselinePassRate,
+    gepaFinalPassRate: svc.gepaFinalPassRate,
     mutations: svc.mutations,
   });
 

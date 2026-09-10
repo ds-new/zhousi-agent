@@ -189,4 +189,78 @@ describe("Hermes evolution closure", () => {
       await cp.close();
     }
   });
+
+  it("auto-pins L2 candidate after admin approve when post-approval eval passes", async () => {
+    const candidateVersionId = "candidate-l2-pin";
+    const cp = createControlPlaneServer({
+      port: 0,
+      evolutionInvoker: async (): Promise<EvolutionRunResponse> => ({
+        runId: "evo-l2-pin",
+        status: "awaiting_review",
+        candidateVersionId,
+        requiresReview: true,
+        gepaRounds: [{ round: 1, passRate: 1 }],
+        mutations: [
+          {
+            path: "prompt/system",
+            before: "You are a helpful assistant.",
+            after: "You are a helpful assistant.\n\nUse pass-token in responses.",
+            tier: "L2",
+          },
+        ],
+      }),
+    });
+    await new Promise<void>((resolve) => cp.server.once("listening", resolve));
+    try {
+      const { json: tenant } = await request(cp.baseUrl, "POST", "/tenants", { name: "L2PinCo" });
+      const tenantId = tenant.id as string;
+      const { json: ws } = await request(cp.baseUrl, "POST", "/workspaces", { tenantId });
+      const { json: profileResult } = await request(cp.baseUrl, "POST", "/profiles", {
+        tenantId,
+        workspaceId: ws.id,
+        governanceTier: "L2",
+        systemPrompt: "You are a helpful assistant.",
+      });
+      const profileId = (profileResult.profile as Record<string, unknown>).id as string;
+
+      for (let i = 0; i < 5; i++) {
+        await request(cp.baseUrl, "POST", "/golden-tasks", {
+          profileId,
+          input: `task-${i}`,
+          expectedContains: ["pass-token"],
+        });
+        await cp.store.saveTrace({
+          profileId,
+          profileVersionId: candidateVersionId as ProfileVersionId,
+          output: "pass-token",
+          latencyMs: 50,
+          toolCalls: [{ name: "kb_search", ok: true }],
+        });
+      }
+
+      const { json: evoResult } = await request(
+        cp.baseUrl,
+        "POST",
+        "/evolution/runs",
+        { tenantId, profileId, target: "prompt" },
+      );
+      const runId = (evoResult.run as Record<string, unknown>).id as string;
+
+      const { status, json: approved } = await request(
+        cp.baseUrl,
+        "POST",
+        `/evolution/runs/${runId}/approve`,
+        { tenantId, reviewer: "admin@corp.com" },
+      );
+      assert.equal(status, 200);
+      assert.equal(approved.status, "completed");
+      assert.ok(approved.postEvolutionEval);
+      const autoPin = approved.autoPin as Record<string, unknown>;
+      assert.equal(autoPin.ok, true);
+      const profile = autoPin.profile as Record<string, unknown>;
+      assert.equal(profile.pinnedVersionId, candidateVersionId);
+    } finally {
+      await cp.close();
+    }
+  });
 });

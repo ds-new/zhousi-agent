@@ -857,7 +857,17 @@ export function createControlPlaneServer(
           | undefined,
       });
       if (!run) return json(res, 404, { error: "run_not_awaiting_review" });
-      return json(res, 200, run);
+      const evolutionClosure = await tryAutoPinAfterEvolution(store, {
+        profileId: run.profileId,
+        tenantId: body.tenantId as TenantId,
+        evolutionRun: run,
+        fireWebhooks,
+      });
+      return json(res, 200, {
+        ...run,
+        postEvolutionEval: evolutionClosure?.postEvolutionEval,
+        autoPin: evolutionClosure?.pin,
+      });
     }
 
     const evoRejectMatch = path.match(/^\/evolution\/runs\/([^/]+)\/reject$/);

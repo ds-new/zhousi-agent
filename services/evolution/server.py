@@ -17,14 +17,18 @@ class EvolutionHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.read(length) if length else "{}")
         tier = body.get("tier", "L1")
-        mutations, engine = run_evolution(body)
+        mutations, engine, gepa_meta = run_evolution(body)
         response = {
             "runId": str(uuid.uuid4()),
             "status": "awaiting_review" if tier == "L2" else "completed",
             "candidateVersionId": f"candidate-{uuid.uuid4().hex[:8]}",
-            "evalScoreDelta": 0.03 if mutations else 0.0,
+            "evalScoreDelta": gepa_meta.get("evalScoreDelta", 0.03 if mutations else 0.0),
             "requiresReview": tier == "L2",
             "engine": engine,
+            "gepaRounds": gepa_meta.get("rounds", []),
+            "gepaBestRound": gepa_meta.get("bestRound"),
+            "gepaBaselinePassRate": gepa_meta.get("baselinePassRate"),
+            "gepaFinalPassRate": gepa_meta.get("finalPassRate"),
             "mutations": mutations,
         }
         self.send_response(200)

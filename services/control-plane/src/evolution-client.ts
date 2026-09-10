@@ -23,6 +23,10 @@ export interface EvolutionRunResponse {
   evalScoreDelta?: number;
   requiresReview?: boolean;
   engine?: string;
+  gepaRounds?: Array<{ round: number; passRate: number }>;
+  gepaBestRound?: number;
+  gepaBaselinePassRate?: number;
+  gepaFinalPassRate?: number;
   mutations?: Array<{ path: string; before: string; after: string; tier: GovernanceTier }>;
 }
 

@@ -608,6 +608,10 @@ export class MemoryStore implements ControlPlaneStore {
 
     run.evalScoreDelta = input.evalScoreDelta;
     run.mutations = input.mutations;
+    run.gepaRounds = input.gepaRounds;
+    run.gepaBestRound = input.gepaBestRound;
+    run.gepaBaselinePassRate = input.gepaBaselinePassRate;
+    run.gepaFinalPassRate = input.gepaFinalPassRate;
 
     if (input.status === "failed") {
       run.status = "failed";
