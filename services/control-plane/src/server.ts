@@ -10,13 +10,12 @@ import {
   type QuotaCheckResult,
 } from "@diy-agent/db";
 import type { AgentProfile, GovernanceTier, ProfileId, TenantId } from "@diy-agent/domain";
-import { DEFAULT_EVOLUTION_SIGNAL_THRESHOLD, defaultWorkspaceAccessPolicy } from "@diy-agent/domain";
 import {
-  invokeEvolutionService,
-  scoreProfileTask,
-  evaluatePinGate,
-  validateGoldenTaskCount,
-} from "./evolution-client.js";
+  DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
+  collectCredentialRefIds,
+  defaultWorkspaceAccessPolicy,
+} from "@diy-agent/domain";
+import { invokeEvolutionService } from "./evolution-client.js";
 import { dispatchWebhooks, type WebhookFetch } from "./webhook-dispatcher.js";
 import {
   requireAuth,
@@ -26,7 +25,9 @@ import {
   type AuthMode,
   type ServiceAccountMode,
 } from "./auth-middleware.js";
-import { collectCredentialRefIds, runProfileEvaluation } from "./profile-eval.js";
+import { runProfileEvaluation } from "./profile-eval.js";
+import { attemptPinProfileVersion } from "./profile-pin.js";
+import { tryAutoPinAfterEvolution } from "./evolution-closure.js";
 import { executeEvolutionPipeline } from "./evolution-orchestrator.js";
 import { proxyKbDocumentIngest, proxyKbSearch, type DataPlaneFetch } from "./kb-proxy.js";
 import { buildKbIngestResponse, computeKbContentHash } from "./kb-registry.js";
@@ -239,6 +240,7 @@ export function createControlPlaneServer(
       if (!evaluation) return json(res, 404, { error: "profile_not_found" });
 
       let evolutionRun: import("@diy-agent/domain").EvolutionRun | undefined;
+      let evolutionClosure: Awaited<ReturnType<typeof tryAutoPinAfterEvolution>> | undefined;
       const tenant = await store.getTenantForProfile(profileId);
       const tenantId = (body.tenantId as TenantId | undefined) ?? tenant?.id;
       if (
@@ -265,6 +267,14 @@ export function createControlPlaneServer(
               });
             }
             evolutionRun = pipeline?.run;
+            if (evolutionRun) {
+              evolutionClosure = await tryAutoPinAfterEvolution(store, {
+                profileId,
+                tenantId,
+                evolutionRun,
+                fireWebhooks,
+              });
+            }
           } catch (err) {
             if (
               !(err instanceof Error && err.message === "evolution_service_unavailable")
@@ -280,6 +290,8 @@ export function createControlPlaneServer(
         gate: evaluation.gate,
         evalRun: evaluation.evalRun,
         evolutionRun,
+        postEvolutionEval: evolutionClosure?.postEvolutionEval,
+        autoPin: evolutionClosure?.pin,
       });
     }
 
@@ -304,61 +316,24 @@ export function createControlPlaneServer(
         profile.pinnedVersionId ??
         (await store.getLatestProfileVersion(profileId))?.id;
       if (!versionId) return json(res, 404, { error: "version_not_found" });
-      const tasks = await store.listGoldenTasks(profileId);
-      const goldenCheck = validateGoldenTaskCount(tasks.length);
-      if (!goldenCheck.ok) return json(res, 400, { error: goldenCheck.reason });
 
-      const traces = await store.listTraces(profileId);
-      const evalTraces = traces.map((t) => ({
-        profileVersionId: t.profileVersionId,
-        output: t.output,
-        latencyMs: t.latencyMs,
-        toolCalls: t.toolCalls,
-        tokensUsed: t.tokensUsed,
-      }));
-      const results = tasks.map((task) =>
-        scoreProfileTask(task, {
-          profileVersionId: versionId,
-          output: task.expectedContains?.[0] ?? "ok",
-          latencyMs: 100,
-        }),
-      );
-      const gate = evaluatePinGate(results, evalTraces);
-      if (!gate.passed) {
-        await fireWebhooks(body.tenantId as string, "eval.pin_gate_failed", {
-          profileId,
-          reasons: gate.reasons,
-        });
-        return json(res, 403, { error: "pin_gate_failed", gate });
-      }
-
-      const pinned = await store.pinProfile(profileId, versionId);
-      if (!pinned) return json(res, 404, { error: "version_not_found" });
-      const pinnedVersion = await store.getProfileVersion(profileId, versionId);
       const tenantId = body.tenantId as TenantId;
-      const policy =
-        (await store.getWorkspacePolicy(profile.workspaceId)) ??
-        defaultWorkspaceAccessPolicy(profile.workspaceId);
-      const mcpCatalog = await store.listMcp(tenantId);
-      const credentialRefIds = collectCredentialRefIds(profile);
-      await store.appendAudit({
-        tenantId,
-        workspaceId: profile.workspaceId,
-        action: "profile.pinned",
-        metadata: { profileId, versionId },
-      });
-      await fireWebhooks(tenantId, "profile.pinned", {
+      const pinResult = await attemptPinProfileVersion(store, {
         profileId,
         versionId,
-        workspaceId: profile.workspaceId,
         tenantId,
-        snapshot: pinnedVersion?.snapshot,
-        pinnedAt: new Date().toISOString(),
-        policy,
-        credentialRefIds,
-        mcpCatalog,
+        fireWebhooks,
       });
-      return json(res, 200, { profile: pinned, gate });
+      if (!pinResult.ok) {
+        if (pinResult.error === "insufficient_golden_tasks") {
+          return json(res, 400, { error: pinResult.goldenCheck?.reason });
+        }
+        if (pinResult.error === "pin_gate_failed") {
+          return json(res, 403, { error: "pin_gate_failed", gate: pinResult.gate });
+        }
+        return json(res, 404, { error: pinResult.error });
+      }
+      return json(res, 200, { profile: pinResult.profile, gate: pinResult.gate });
     }
 
     const profileSyncMatch = path.match(/^\/tenants\/([^/]+)\/profile-sync$/);

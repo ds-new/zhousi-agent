@@ -101,11 +101,19 @@ describe("Sprint 2b — external MCP KB, webhooks, audit log", () => {
         workspaceId: ws.id,
       });
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
+      const versionId = (profileResult.version as Record<string, unknown>).id as string;
       for (let i = 0; i < 5; i++) {
         await request(cp.baseUrl, "POST", "/golden-tasks", {
           profileId,
           input: `task-${i}`,
           expectedContains: ["ok"],
+        });
+        await cp.store.saveTrace({
+          profileId,
+          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
+          output: "ok",
+          latencyMs: 50,
+          toolCalls: [{ name: "tool", ok: true }],
         });
       }
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });
@@ -181,11 +189,19 @@ describe("Sprint 2b — external MCP KB, webhooks, audit log", () => {
         workspaceId: ws.id,
       });
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
+      const versionId = (profileResult.version as Record<string, unknown>).id as string;
       for (let i = 0; i < 5; i++) {
         await request(cp.baseUrl, "POST", "/golden-tasks", {
           profileId,
           input: `task-${i}`,
           expectedContains: ["ok"],
+        });
+        await cp.store.saveTrace({
+          profileId,
+          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
+          output: "ok",
+          latencyMs: 50,
+          toolCalls: [{ name: "tool", ok: true }],
         });
       }
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });

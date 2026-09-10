@@ -58,6 +58,13 @@ describe("control-plane HTTP seam", () => {
         input: `task-${i}`,
         expectedContains: ["ok"],
       });
+      await cp.store.saveTrace({
+        profileId,
+        profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
+        output: "ok",
+        latencyMs: 50,
+        toolCalls: [{ name: "tool", ok: true }],
+      });
     }
     const { status: pinStatus } = await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, {
       tenantId,

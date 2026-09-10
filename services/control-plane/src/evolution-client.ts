@@ -22,6 +22,7 @@ export interface EvolutionRunResponse {
   candidateVersionId?: string;
   evalScoreDelta?: number;
   requiresReview?: boolean;
+  engine?: string;
   mutations?: Array<{ path: string; before: string; after: string; tier: GovernanceTier }>;
 }
 

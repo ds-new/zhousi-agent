@@ -1,13 +1,10 @@
-import type { AgentProfile, ProfileId, ProfileVersionId } from "@diy-agent/domain";
-import { collectCredentialRefIds } from "@diy-agent/domain";
+import type { ProfileId, ProfileVersionId } from "@diy-agent/domain";
 import {
   evaluatePinGate,
   scoreProfileTask,
   type EvalTrace,
 } from "@diy-agent/eval-harness";
 import type { ControlPlaneStore, EvalTraceRecord } from "@diy-agent/db";
-
-export { collectCredentialRefIds };
 
 function tracesToEval(traces: EvalTraceRecord[]): EvalTrace[] {
   return traces.map((t) => ({
@@ -19,6 +16,27 @@ function tracesToEval(traces: EvalTraceRecord[]): EvalTrace[] {
   }));
 }
 
+function traceForTask(
+  versionId: ProfileVersionId,
+  trace: EvalTraceRecord | undefined,
+): EvalTrace {
+  if (trace) {
+    return {
+      profileVersionId: versionId,
+      output: trace.output,
+      latencyMs: trace.latencyMs,
+      toolCalls: trace.toolCalls,
+      tokensUsed: trace.tokensUsed,
+    };
+  }
+  return {
+    profileVersionId: versionId,
+    output: "",
+    latencyMs: Number.MAX_SAFE_INTEGER,
+    toolCalls: [],
+  };
+}
+
 export async function runProfileEvaluation(
   store: ControlPlaneStore,
   profileId: ProfileId,
@@ -28,16 +46,11 @@ export async function runProfileEvaluation(
   if (!profile) return null;
 
   const tasks = await store.listGoldenTasks(profileId);
-  const traces = await store.listTraces(profileId);
-  const evalTraces = tracesToEval(traces);
-  const results = tasks.map((task) =>
-    scoreProfileTask(task, {
-      profileVersionId: versionId,
-      output: task.expectedContains?.[0] ?? traces[0]?.output ?? "ok",
-      latencyMs: traces[0]?.latencyMs ?? 100,
-      toolCalls: traces[0]?.toolCalls,
-      tokensUsed: traces[0]?.tokensUsed,
-    }),
+  const allTraces = await store.listTraces(profileId);
+  const versionTraces = allTraces.filter((t) => t.profileVersionId === versionId);
+  const evalTraces = tracesToEval(versionTraces);
+  const results = tasks.map((task, index) =>
+    scoreProfileTask(task, traceForTask(versionId, versionTraces[index])),
   );
   const gate = evaluatePinGate(results, evalTraces);
   const evalRun = await store.saveProfileEvalRun({

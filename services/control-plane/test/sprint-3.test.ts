@@ -36,11 +36,19 @@ describe("Sprint 3 — enterprise vault sync, dedicated isolation, profile-sync"
         name: "enterprise-bot",
       });
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
+      const versionId = (profileResult.version as Record<string, unknown>).id as string;
       for (let i = 0; i < 5; i++) {
         await request(cp.baseUrl, "POST", "/golden-tasks", {
           profileId,
           input: `task-${i}`,
           expectedContains: ["ok"],
+        });
+        await cp.store.saveTrace({
+          profileId,
+          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
+          output: "ok",
+          latencyMs: 50,
+          toolCalls: [{ name: "tool", ok: true }],
         });
       }
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });
@@ -88,11 +96,19 @@ describe("Sprint 3 — enterprise vault sync, dedicated isolation, profile-sync"
         name: "sync-bot",
       });
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
+      const versionId = (profileResult.version as Record<string, unknown>).id as string;
       for (let i = 0; i < 5; i++) {
         await request(cp.baseUrl, "POST", "/golden-tasks", {
           profileId,
           input: `task-${i}`,
           expectedContains: ["ok"],
+        });
+        await cp.store.saveTrace({
+          profileId,
+          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
+          output: "ok",
+          latencyMs: 50,
+          toolCalls: [{ name: "tool", ok: true }],
         });
       }
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });
