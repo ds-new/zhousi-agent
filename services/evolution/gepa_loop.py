@@ -1,4 +1,8 @@
-"""GEPA-style multi-round eval → mutate → re-eval loop."""
+"""GEPA-style multi-round eval → mutate → re-eval loop (evolution sidecar fallback).
+
+Control Plane orchestrates GEPA by default via golden-task-runner agent re-eval.
+Enable this module with DIY_GEPA_ENABLED=1 on the evolution service only.
+"""
 from __future__ import annotations
 
 import copy

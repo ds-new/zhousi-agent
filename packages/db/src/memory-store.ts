@@ -700,13 +700,6 @@ export class MemoryStore implements ControlPlaneStore {
 
     run.candidateVersionId = candidateId;
     run.status = "completed";
-    await this.appendAudit({
-      tenantId: input.tenantId,
-      workspaceId: profile.workspaceId,
-      action: "evolution.approved",
-      actor: input.reviewer,
-      metadata: { runId: run.id, candidateVersionId: candidateId },
-    });
     return run;
   }
 

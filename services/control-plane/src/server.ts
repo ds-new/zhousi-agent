@@ -28,7 +28,9 @@ import {
 import { runProfileEvaluation } from "./profile-eval.js";
 import { attemptPinProfileVersion } from "./profile-pin.js";
 import { tryAutoPinAfterEvolution } from "./evolution-closure.js";
+import { emitEvolutionApproved } from "./evolution-events.js";
 import { executeEvolutionPipeline } from "./evolution-orchestrator.js";
+import type { AgentGoldenTaskRunner } from "./golden-task-runner.js";
 import { proxyKbDocumentIngest, proxyKbSearch, type DataPlaneFetch } from "./kb-proxy.js";
 import { buildKbIngestResponse, computeKbContentHash } from "./kb-registry.js";
 import type { JwksOidcConfig } from "@diy-agent/auth";
@@ -45,6 +47,7 @@ export interface CreateControlPlaneOptions {
   port?: number;
   storage?: "memory" | "postgres";
   evolutionInvoker?: typeof invokeEvolutionService;
+  agentGoldenTaskRunner?: AgentGoldenTaskRunner;
   webhookFetch?: WebhookFetch;
   authMode?: AuthMode;
   serviceAccountMode?: ServiceAccountMode;
@@ -91,6 +94,7 @@ export function createControlPlaneServer(
   const store = options.store ?? new MemoryStore();
   const storage = options.storage ?? "memory";
   const evolve = options.evolutionInvoker ?? invokeEvolutionService;
+  const agentRunner = options.agentGoldenTaskRunner;
   const webhookFetch = options.webhookFetch ?? globalThis.fetch.bind(globalThis);
   const authOptions = {
     mode: options.authMode ?? ("none" as AuthMode),
@@ -260,6 +264,7 @@ export function createControlPlaneServer(
               signalResult,
               tenantId,
               evolve,
+              agentRunner,
             );
             if (pipeline?.awaitingReview) {
               await fireWebhooks(tenantId, "evolution.awaiting_review", {
@@ -273,6 +278,7 @@ export function createControlPlaneServer(
                 tenantId,
                 evolutionRun,
                 fireWebhooks,
+                agentRunner,
               });
             }
           } catch (err) {
@@ -746,6 +752,7 @@ export function createControlPlaneServer(
           run,
           body.tenantId as TenantId,
           evolve,
+          agentRunner,
         );
         if (!pipeline) return json(res, 400, { error: "invalid_profile" });
         if (pipeline.awaitingReview) {
@@ -795,6 +802,7 @@ export function createControlPlaneServer(
           run,
           body.tenantId as TenantId,
           evolve,
+          agentRunner,
         );
         if (!pipeline) return json(res, 400, { error: "invalid_profile" });
         if (pipeline.awaitingReview) {
@@ -861,6 +869,15 @@ export function createControlPlaneServer(
         profileId: run.profileId,
         tenantId: body.tenantId as TenantId,
         evolutionRun: run,
+        fireWebhooks,
+        agentRunner,
+      });
+      const reviewer = (body.reviewer as string) ?? auth.subject;
+      await emitEvolutionApproved(store, {
+        tenantId: body.tenantId as TenantId,
+        run,
+        reviewer,
+        closure: evolutionClosure,
         fireWebhooks,
       });
       return json(res, 200, {

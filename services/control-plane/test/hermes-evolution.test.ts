@@ -124,7 +124,7 @@ describe("Hermes evolution closure", () => {
     }
   });
 
-  it("auto-pins candidate after evolution when post-evolution eval passes pin gate", async () => {
+  it("auto-pins candidate after evolution when agent re-eval passes pin gate", async () => {
     const candidateVersionId = "candidate-auto-pin";
     const cp = createControlPlaneServer({
       port: 0,
@@ -162,13 +162,6 @@ describe("Hermes evolution closure", () => {
           input: `task-${i}`,
           expectedContains: ["pass-token"],
         });
-        await cp.store.saveTrace({
-          profileId,
-          profileVersionId: candidateVersionId as ProfileVersionId,
-          output: "pass-token",
-          latencyMs: 50,
-          toolCalls: [{ name: "kb_search", ok: true }],
-        });
       }
 
       const { status, json } = await request(cp.baseUrl, "POST", `/profiles/${profileId}/eval/run`, {
@@ -190,10 +183,15 @@ describe("Hermes evolution closure", () => {
     }
   });
 
-  it("auto-pins L2 candidate after admin approve when post-approval eval passes", async () => {
+  it("auto-pins L2 candidate after admin approve when agent re-eval passes", async () => {
     const candidateVersionId = "candidate-l2-pin";
+    const webhookEvents: string[] = [];
     const cp = createControlPlaneServer({
       port: 0,
+      webhookFetch: async (_url, init) => {
+        webhookEvents.push(init?.headers?.["X-DIY-Event"] ?? "");
+        return new Response(null, { status: 200 });
+      },
       evolutionInvoker: async (): Promise<EvolutionRunResponse> => ({
         runId: "evo-l2-pin",
         status: "awaiting_review",
@@ -214,6 +212,11 @@ describe("Hermes evolution closure", () => {
     try {
       const { json: tenant } = await request(cp.baseUrl, "POST", "/tenants", { name: "L2PinCo" });
       const tenantId = tenant.id as string;
+      await request(cp.baseUrl, "POST", "/webhooks", {
+        tenantId,
+        url: "https://hooks.example/evolution",
+        events: ["evolution.approved", "profile.pinned"],
+      });
       const { json: ws } = await request(cp.baseUrl, "POST", "/workspaces", { tenantId });
       const { json: profileResult } = await request(cp.baseUrl, "POST", "/profiles", {
         tenantId,
@@ -228,13 +231,6 @@ describe("Hermes evolution closure", () => {
           profileId,
           input: `task-${i}`,
           expectedContains: ["pass-token"],
-        });
-        await cp.store.saveTrace({
-          profileId,
-          profileVersionId: candidateVersionId as ProfileVersionId,
-          output: "pass-token",
-          latencyMs: 50,
-          toolCalls: [{ name: "kb_search", ok: true }],
         });
       }
 
@@ -259,6 +255,16 @@ describe("Hermes evolution closure", () => {
       assert.equal(autoPin.ok, true);
       const profile = autoPin.profile as Record<string, unknown>;
       assert.equal(profile.pinnedVersionId, candidateVersionId);
+      assert.ok(webhookEvents.includes("evolution.approved"));
+      assert.ok(webhookEvents.includes("profile.pinned"));
+
+      const audit = await cp.store.listAuditLog(tenantId);
+      const approvedAudit = audit.find((event) => event.action === "evolution.approved");
+      assert.ok(approvedAudit);
+      assert.equal(
+        (approvedAudit!.metadata as Record<string, unknown>).autoPinOk,
+        true,
+      );
     } finally {
       await cp.close();
     }

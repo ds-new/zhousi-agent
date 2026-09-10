@@ -20,7 +20,7 @@ def _dspy_available() -> bool:
 
 
 def _gepa_enabled() -> bool:
-    return os.environ.get("DIY_GEPA_ENABLED", "1") != "0"
+    return os.environ.get("DIY_GEPA_ENABLED", "0") != "0"
 
 
 def _propose(body: dict[str, Any], mode: str) -> tuple[list[dict[str, Any]], str]:

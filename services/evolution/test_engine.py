@@ -8,7 +8,7 @@ from heuristic import propose_mutations
 
 class EvolutionEngineTest(unittest.TestCase):
     def setUp(self) -> None:
-        os.environ["DIY_GEPA_ENABLED"] = "1"
+        os.environ["DIY_GEPA_ENABLED"] = "0"
         os.environ["DIY_GEPA_MAX_ROUNDS"] = "3"
 
     def test_heuristic_engine_mode(self) -> None:
@@ -29,6 +29,7 @@ class EvolutionEngineTest(unittest.TestCase):
     def test_dspy_stub_engine_mode(self) -> None:
         os.environ["DIY_EVOLUTION_ENGINE"] = "dspy"
         os.environ["DIY_EVOLUTION_USE_DSPY_STUB"] = "1"
+        os.environ["DIY_GEPA_ENABLED"] = "1"
         mutations, engine, gepa_meta = run_evolution(
             {
                 "target": "skill",
@@ -42,6 +43,9 @@ class EvolutionEngineTest(unittest.TestCase):
         self.assertGreaterEqual(len(gepa_meta.get("rounds", [])), 1)
 
     def test_gepa_loop_reaches_target_pass_rate(self) -> None:
+        import os
+
+        os.environ["DIY_GEPA_ENABLED"] = "1"
         body = {
             "baseVersionId": "v1",
             "target": "prompt",
