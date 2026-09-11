@@ -28,3 +28,11 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
   return denom === 0 ? 0 : dot / denom;
 }
+
+export type EmbeddingProvider = (text: string) => Promise<number[]>;
+
+/** PostgreSQL schema and all retrieval vectors use the same fixed dimension contract. */
+export function validateEmbedding(values: number[]): number[] {
+  if (!Array.isArray(values) || values.length !== EMBEDDING_DIMENSIONS || values.some(value => typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 3.402823466e38) || !values.some(value => value !== 0)) throw new Error("kb_embedding_invalid");
+  return [...values];
+}

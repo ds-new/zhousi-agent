@@ -13,10 +13,15 @@
   "dependencies": {
     "@diy-agent/dsh-kb-plugin": "*",
     "@diy-agent/dsh-profile-sync-plugin": "*",
-    "@diy-agent/dsh-vault-plugin": "*"
+    "@diy-agent/dsh-vault-plugin": "*",
+    "@diy-agent/domain": "*",
+    "@diy-agent/dsh-mcp-pool-plugin": "*",
+    "@diy-agent/dsh-memory-plugin": "*",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "@types/pg": "^8.11.10"
   }
 }

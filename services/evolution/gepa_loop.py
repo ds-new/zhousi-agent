@@ -110,50 +110,13 @@ def _mutation_tool_names(mutations: list[dict[str, Any]]) -> set[str]:
     return names
 
 
-def simulate_improved_traces(
-    tasks: list[dict[str, Any]],
-    traces: list[dict[str, Any]],
-    mutations: list[dict[str, Any]],
-    version_id: str | None,
-) -> list[dict[str, Any]]:
-    if not version_id:
-        return list(traces)
-
-    other = [trace for trace in traces if trace.get("profileVersionId") != version_id]
-    scoped = version_traces(traces, version_id)
-    prompt_mutation = next((m for m in mutations if m.get("path") == "prompt/system"), None)
-    tool_names = _mutation_tool_names(mutations)
-    improved: list[dict[str, Any]] = []
-
-    for index, task in enumerate(tasks):
-        base = copy.deepcopy(scoped[index]) if index < len(scoped) else {
-            "profileVersionId": version_id,
-            "output": "",
-            "latencyMs": 100,
-            "toolCalls": [],
-        }
-        base["profileVersionId"] = version_id
-        expected = task.get("expectedContains") or []
-        if prompt_mutation and not base.get("output"):
-            base["output"] = " ".join(str(token) for token in expected) or "substantive answer"
-        if tool_names:
-            tool_calls = []
-            for tool_call in base.get("toolCalls") or []:
-                updated = dict(tool_call)
-                if updated.get("name") in tool_names:
-                    updated["ok"] = True
-                tool_calls.append(updated)
-            base["toolCalls"] = tool_calls
-        improved.append(base)
-
-    return other + improved
-
-
 ProposeFn = Callable[[dict[str, Any]], list[dict[str, Any]]]
 
 
-def run_gepa_loop(body: dict[str, Any], propose: ProposeFn) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def run_gepa_loop(body: dict[str, Any], propose: ProposeFn, evaluate: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     tasks = list(body.get("evalTasks") or [])
+    if tasks and evaluate is None:
+        raise RuntimeError("agent_evaluator_required")
     traces = list(body.get("traces") or [])
     version_id = body.get("baseVersionId")
     snapshot = copy.deepcopy(body.get("snapshot") or {})
@@ -205,7 +168,7 @@ def run_gepa_loop(body: dict[str, Any], propose: ProposeFn) -> tuple[list[dict[s
             break
 
         working_snapshot = apply_mutations(working_snapshot, mutations)
-        working_traces = simulate_improved_traces(tasks, working_traces, mutations, version_id)
+        working_traces = evaluate(working_snapshot) if evaluate else []
         pass_rate = evaluate_pass_rate(tasks, working_traces, version_id)
         rounds_log.append({"round": round_num, "passRate": pass_rate})
 

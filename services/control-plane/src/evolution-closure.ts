@@ -27,12 +27,7 @@ async function ensureCandidateTraces(
   );
   if (!candidateVersion) return;
 
-  const existing = (await store.listTraces(input.profileId)).filter(
-    (trace) => trace.profileVersionId === input.candidateVersionId,
-  );
-  const tasks = await store.listGoldenTasks(input.profileId);
-  if (existing.length >= tasks.length) return;
-
+  // Promotion always needs a fresh, complete execution batch; ordinary traces are not evidence.
   await runGoldenTaskAgentEval(store, {
     profileId: input.profileId,
     profileVersionId: input.candidateVersionId,
@@ -53,6 +48,8 @@ export async function tryAutoPinAfterEvolution(
 ): Promise<EvolutionClosureResult | null> {
   if (input.evolutionRun.status !== "completed") return null;
   if (!input.evolutionRun.candidateVersionId) return null;
+  const tasks = await store.listGoldenTasks(input.profileId);
+  if (tasks.length < 5 || tasks.length > 100) return null;
 
   const runner = input.agentRunner ?? defaultSnapshotAwareGoldenTaskRunner;
   await ensureCandidateTraces(store, {

@@ -1,5 +1,8 @@
 import type { KnowledgeBaseConfig, WorkspaceId } from "@diy-agent/domain";
 import { InternalKbStore } from "./internal-kb-store.js";
+import { ProtocolMcpKbSearchClient } from "./protocol-mcp-kb-client.js";
+export { ProtocolMcpKbSearchClient } from "./protocol-mcp-kb-client.js";
+export type { McpConnectionOptions } from "@diy-agent/dsh-mcp-pool-plugin";
 import {
   ExternalMcpKbConnector,
   HttpMcpKbSearchClient,
@@ -9,7 +12,7 @@ import {
 import type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
 
 export type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
-export { embedText, cosineSimilarity, EMBEDDING_DIMENSIONS } from "./embedding.js";
+export { embedText, cosineSimilarity, EMBEDDING_DIMENSIONS, validateEmbedding, type EmbeddingProvider } from "./embedding.js";
 export { InternalKbStore, getInternalIndex, resetInternalIndexForTests } from "./internal-kb-store.js";
 export { PostgresKbStore } from "./postgres-kb-store.js";
 export {
@@ -44,6 +47,7 @@ function reciprocalRankFusion(
 
 export class HybridKbService {
   private internal: KbStore;
+  private ownedExternalClient?: ProtocolMcpKbSearchClient;
 
   constructor(
     private config: KnowledgeBaseConfig,
@@ -53,6 +57,8 @@ export class HybridKbService {
   ) {
     this.internal = internalStore ?? new InternalKbStore();
   }
+
+  async close(): Promise<void> { await this.ownedExternalClient?.close(); }
 
   async ingest(
     workspaceId: WorkspaceId,
@@ -73,7 +79,7 @@ export class HybridKbService {
     if (this.config.externalMcp) {
       const ext = new ExternalMcpKbConnector(
         this.config.externalMcp,
-        this.externalClient ?? new HttpMcpKbSearchClient(),
+        this.externalClient ?? (this.ownedExternalClient ??= new ProtocolMcpKbSearchClient()),
         { ...this.mcpContext, workspaceId },
       );
       lists.push(await ext.search(query));

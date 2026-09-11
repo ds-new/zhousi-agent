@@ -37,7 +37,8 @@ export async function invokeEvolutionService(
 ): Promise<EvolutionRunResponse> {
   const res = await fetch(`${EVOLUTION_URL}/run`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(120_000),
+    headers: { "Content-Type": "application/json", ...(process.env.DIY_EVOLUTION_INTERNAL_TOKEN ? { Authorization: `Bearer ${process.env.DIY_EVOLUTION_INTERNAL_TOKEN}` } : {}) },
     body: JSON.stringify(req),
   });
   if (!res.ok) {

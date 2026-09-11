@@ -1,3 +1,4 @@
+import { executeFixtureBenchmark } from "./fixtures/agent-runner.js";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createControlPlaneServer } from "../src/server.js";
@@ -108,14 +109,8 @@ describe("Sprint 2b — external MCP KB, webhooks, audit log", () => {
           input: `task-${i}`,
           expectedContains: ["ok"],
         });
-        await cp.store.saveTrace({
-          profileId,
-          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
-          output: "ok",
-          latencyMs: 50,
-          toolCalls: [{ name: "tool", ok: true }],
-        });
       }
+      await executeFixtureBenchmark(cp.store, profileId, versionId);
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });
       assert.equal(deliveries.length, 1);
       assert.equal(deliveries[0]!.event, "profile.pinned");
@@ -196,14 +191,8 @@ describe("Sprint 2b — external MCP KB, webhooks, audit log", () => {
           input: `task-${i}`,
           expectedContains: ["ok"],
         });
-        await cp.store.saveTrace({
-          profileId,
-          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
-          output: "ok",
-          latencyMs: 50,
-          toolCalls: [{ name: "tool", ok: true }],
-        });
       }
+      await executeFixtureBenchmark(cp.store, profileId, versionId);
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });
       await request(cp.baseUrl, "POST", "/audit", {
         tenantId,

@@ -1,12 +1,14 @@
 import type { WorkspaceId } from "@diy-agent/domain";
 import type { KbDocument, KbSearchHit } from "./types.js";
-import { cosineSimilarity, embedText } from "./embedding.js";
+import { cosineSimilarity, embedText, validateEmbedding, type EmbeddingProvider } from "./embedding.js";
 
 const internalIndex = new Map<string, KbDocument[]>();
 
 export class InternalKbStore {
+  constructor(private embeddingProvider?: EmbeddingProvider) {}
   async ingest(doc: Omit<KbDocument, "id" | "createdAt">): Promise<KbDocument> {
-    const embedding = doc.embedding ?? embedText(`${doc.title} ${doc.content}`);
+    const text = `${doc.title} ${doc.content}`;
+    const embedding = validateEmbedding(doc.embedding ?? (this.embeddingProvider ? await this.embeddingProvider(text) : embedText(text)));
     const entry: KbDocument = {
       ...doc,
       embedding,
@@ -23,7 +25,7 @@ export class InternalKbStore {
     const docs = internalIndex.get(workspaceId) ?? [];
     if (docs.length === 0) return [];
 
-    const queryEmbedding = embedText(query);
+    const queryEmbedding = validateEmbedding(this.embeddingProvider ? await this.embeddingProvider(query) : embedText(query));
     return docs
       .map((doc) => ({
         documentId: doc.id,

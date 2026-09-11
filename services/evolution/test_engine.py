@@ -29,7 +29,7 @@ class EvolutionEngineTest(unittest.TestCase):
     def test_dspy_stub_engine_mode(self) -> None:
         os.environ["DIY_EVOLUTION_ENGINE"] = "dspy"
         os.environ["DIY_EVOLUTION_USE_DSPY_STUB"] = "1"
-        os.environ["DIY_GEPA_ENABLED"] = "1"
+        os.environ["DIY_GEPA_ENABLED"] = "0"
         mutations, engine, gepa_meta = run_evolution(
             {
                 "target": "skill",
@@ -40,9 +40,9 @@ class EvolutionEngineTest(unittest.TestCase):
         )
         self.assertEqual(engine, "dspy-stub")
         self.assertTrue(mutations)
-        self.assertGreaterEqual(len(gepa_meta.get("rounds", [])), 1)
+        self.assertEqual(gepa_meta, {})
 
-    def test_gepa_loop_reaches_target_pass_rate(self) -> None:
+    def test_gepa_loop_requires_real_evaluation(self) -> None:
         import os
 
         os.environ["DIY_GEPA_ENABLED"] = "1"
@@ -62,11 +62,9 @@ class EvolutionEngineTest(unittest.TestCase):
             ]
             * 5,
         }
-        mutations, meta = run_gepa_loop(body, propose_mutations)
-        self.assertTrue(mutations)
-        self.assertGreaterEqual(meta["finalPassRate"], 0.85)
-        self.assertGreater(meta["evalScoreDelta"], 0)
-        self.assertGreaterEqual(meta["bestRound"], 1)
+        with self.assertRaisesRegex(RuntimeError, "agent_evaluator_required"):
+            run_gepa_loop(body, propose_mutations)
+
 
 
 if __name__ == "__main__":

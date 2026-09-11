@@ -1,3 +1,4 @@
+import { fixtureAgentRunner } from "./fixtures/agent-runner.js";
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import type { ProfileVersionId } from "@diy-agent/domain";
@@ -20,8 +21,9 @@ async function request(
 }
 
 describe("Hermes evolution closure", () => {
-  it("auto-applies L1 mutations and creates candidate profile version", async () => {
+  it("escalates prompt mutations to L2 review and creates a candidate version", async () => {
     const cp = createControlPlaneServer({
+      agentGoldenTaskRunner: fixtureAgentRunner,
       port: 0,
       evolutionInvoker: async (): Promise<EvolutionRunResponse> => ({
         runId: "evo-mock",
@@ -57,7 +59,7 @@ describe("Hermes evolution closure", () => {
       });
       assert.equal(status, 201);
       const run = json.run as Record<string, unknown>;
-      assert.equal(run.status, "completed");
+      assert.equal(run.status, "awaiting_review");
       assert.equal(run.candidateVersionId, "candidate-evolved");
 
       const { json: version } = await request(
@@ -74,8 +76,9 @@ describe("Hermes evolution closure", () => {
     }
   });
 
-  it("triggers evolution from failed eval pass rate for L1 profiles", async () => {
+  it("triggers L1 evolution but rejects candidates with no measured improvement", async () => {
     const cp = createControlPlaneServer({
+      agentGoldenTaskRunner: fixtureAgentRunner,
       port: 0,
       evolutionInvoker: async (): Promise<EvolutionRunResponse> => ({
         runId: "evo-signal",
@@ -103,10 +106,11 @@ describe("Hermes evolution closure", () => {
         mcpBindings: [{ serverName: "lookup_order", transport: "stdio" }],
       });
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 10; i++) {
         await request(cp.baseUrl, "POST", "/golden-tasks", {
           profileId,
           input: `task-${i}`,
+          split: i >= 5 ? "holdout" : "train",
           expectedContains: ["alpha", "beta", "gamma"],
         });
       }
@@ -117,7 +121,7 @@ describe("Hermes evolution closure", () => {
       assert.equal(status, 200);
       assert.ok(json.evolutionRun);
       const evolutionRun = json.evolutionRun as Record<string, unknown>;
-      assert.equal(evolutionRun.status, "completed");
+      assert.equal(evolutionRun.status, "failed");
       assert.equal(evolutionRun.trigger, "signal");
     } finally {
       await cp.close();
@@ -127,6 +131,7 @@ describe("Hermes evolution closure", () => {
   it("auto-pins candidate after evolution when agent re-eval passes pin gate", async () => {
     const candidateVersionId = "candidate-auto-pin";
     const cp = createControlPlaneServer({
+      agentGoldenTaskRunner: fixtureAgentRunner,
       port: 0,
       evolutionInvoker: async (): Promise<EvolutionRunResponse> => ({
         runId: "evo-auto-pin",
@@ -136,7 +141,7 @@ describe("Hermes evolution closure", () => {
         engine: "heuristic",
         mutations: [
           {
-            path: "prompt/system",
+            path: "mcp/lookup/description",
             before: "You are a helpful assistant.",
             after: "You are a helpful assistant.\n\nUse pass-token in responses.",
             tier: "L1",
@@ -153,13 +158,15 @@ describe("Hermes evolution closure", () => {
         workspaceId: ws.id,
         governanceTier: "L1",
         systemPrompt: "You are a helpful assistant.",
+        mcpBindings: [{ serverName: "lookup", transport: "stdio", description: "generic" }],
       });
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
 
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 10; i++) {
         await request(cp.baseUrl, "POST", "/golden-tasks", {
           profileId,
           input: `task-${i}`,
+          split: i >= 5 ? "holdout" : "train",
           expectedContains: ["pass-token"],
         });
       }
@@ -187,6 +194,7 @@ describe("Hermes evolution closure", () => {
     const candidateVersionId = "candidate-l2-pin";
     const webhookEvents: string[] = [];
     const cp = createControlPlaneServer({
+      agentGoldenTaskRunner: fixtureAgentRunner,
       port: 0,
       webhookFetch: async (_url, init) => {
         webhookEvents.push(init?.headers?.["X-DIY-Event"] ?? "");
@@ -226,10 +234,11 @@ describe("Hermes evolution closure", () => {
       });
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
 
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 10; i++) {
         await request(cp.baseUrl, "POST", "/golden-tasks", {
           profileId,
           input: `task-${i}`,
+          split: i >= 5 ? "holdout" : "train",
           expectedContains: ["pass-token"],
         });
       }

@@ -1,3 +1,4 @@
+import { executeFixtureBenchmark } from "./fixtures/agent-runner.js";
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import { generateServiceAccountToken } from "@diy-agent/auth";
@@ -56,14 +57,8 @@ describe("Phase 4 — profile eval run, policy snapshot, eval history", () => {
         input: `task-${i}`,
         expectedContains: ["ok"],
       });
-      await cp.store.saveTrace({
-        profileId,
-        profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
-        output: "ok",
-        latencyMs: 50,
-        toolCalls: [{ name: "tool", ok: true }],
-      });
     }
+    await executeFixtureBenchmark(cp.store, profileId, versionId);
 
     const { status, json } = await request(
       cp.baseUrl,
@@ -77,7 +72,7 @@ describe("Phase 4 — profile eval run, policy snapshot, eval history", () => {
     assert.ok(json.evalRun);
 
     const { json: history } = await request(cp.baseUrl, "GET", `/profiles/${profileId}/eval/runs`);
-    assert.equal((history.runs as unknown[]).length, 1);
+    assert.equal((history.runs as unknown[]).length, 2);
   });
 
   it("returns workspace policy and credential refs in profile version snapshot", async () => {

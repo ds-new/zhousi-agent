@@ -1,0 +1,73 @@
+name: Production quality gates
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: diy_agent_test
+          # Ephemeral loopback-only test DB. No production credentials or repository secrets.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d diy_agent_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DIY_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/diy_agent_test
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Build and run complete TypeScript tests
+        run: npm test
+      - name: Typecheck every package
+        run: npm run typecheck
+      - name: Python engine and HTTP tests
+        run: npm run test:python
+      - name: PostgreSQL control-plane isolation, atomicity and recovery
+        run: npm run test:postgres
+      - name: PostgreSQL data-plane locks, persistence and delivery
+        run: npm run test:postgres:runtime
+      - name: PostgreSQL knowledge-base tenant routing
+        run: npm run test:postgres:kb
+      - name: Audit dependencies
+        run: npm audit --package-lock-only --audit-level=high
+      - name: Validate development Compose
+        run: docker compose -f docker-compose.yml config --quiet
+      - name: Validate fail-closed production Compose
+        run: node .github/scripts/check-deployment.mjs
+      - name: Install checksum-pinned Helm for local rendering
+        run: |
+          curl --fail --location --retry 3 https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz -o "$RUNNER_TEMP/helm.tar.gz"
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/helm.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/linux-amd64" >> "$GITHUB_PATH"
+      - name: Lint and render production charts without cluster access
+        run: |
+          helm lint helm/control-plane --strict --set authSecretName=fixture-secret
+          helm lint helm/data-plane --strict --set authSecretName=fixture-secret,env.tenantId=fixture-tenant,env.controlPlaneUrl=https://control.example
+          helm template fixture helm/control-plane --set authSecretName=fixture-secret > "$RUNNER_TEMP/control-plane.yaml"
+          helm template fixture helm/data-plane --set authSecretName=fixture-secret,env.tenantId=fixture-tenant,env.controlPlaneUrl=https://control.example > "$RUNNER_TEMP/data-plane.yaml"
+      - name: Build deployable images
+        run: |
+          docker build -f Dockerfile.control-plane -t diy-control-plane:ci .
+          docker build -f Dockerfile.data-plane -t diy-data-plane:ci .
+          docker build -f Dockerfile.evolution -t diy-evolution:ci .

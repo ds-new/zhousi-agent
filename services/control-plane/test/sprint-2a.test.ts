@@ -96,6 +96,7 @@ describe("Sprint 2a — KB vectors, trace TTL, evolution context", () => {
     let captured: EvolutionRunRequest | null = null;
     const mockCp = createControlPlaneServer({
       port: 0,
+      agentGoldenTaskRunner: async () => ({ output: "", latencyMs: 1, toolCalls: [] }),
       evolutionInvoker: async (req): Promise<EvolutionRunResponse> => {
         captured = req;
         return {
@@ -120,10 +121,8 @@ describe("Sprint 2a — KB vectors, trace TTL, evolution context", () => {
       const profileId = (profileResult.profile as Record<string, unknown>).id as string;
       const versionId = (profileResult.version as Record<string, unknown>).id as string;
 
-      await request(mockCp.baseUrl, "POST", "/golden-tasks", {
-        profileId,
-        input: "handle refund",
-        expectedContains: ["refund"],
+      for (let i = 0; i < 10; i++) await request(mockCp.baseUrl, "POST", "/golden-tasks", {
+        profileId, input: `handle refund ${i}`, expectedContains: ["refund"], split: i >= 5 ? "holdout" : "train",
       });
       await request(mockCp.baseUrl, "POST", "/traces", {
         profileId,
@@ -142,9 +141,9 @@ describe("Sprint 2a — KB vectors, trace TTL, evolution context", () => {
       assert.ok(captured);
       assert.equal(captured!.profileId, profileId);
       assert.ok(Array.isArray(captured!.traces));
-      assert.equal((captured!.traces as unknown[]).length, 1);
+      assert.equal((captured!.traces as unknown[]).length, 5);
       assert.ok(Array.isArray(captured!.evalTasks));
-      assert.equal((captured!.evalTasks as unknown[]).length, 1);
+      assert.equal((captured!.evalTasks as unknown[]).length, 5);
       assert.ok(captured!.snapshot);
     } finally {
       await mockCp.close();

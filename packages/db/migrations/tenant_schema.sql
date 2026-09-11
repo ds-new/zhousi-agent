@@ -8,6 +8,11 @@ CREATE TABLE IF NOT EXISTS :schema.sessions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS :schema.catalog_state (
+  id TEXT PRIMARY KEY,
+  payload JSONB NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS :schema.audit_log (
   id UUID PRIMARY KEY,
   tenant_id UUID NOT NULL,
@@ -51,3 +56,10 @@ CREATE TABLE IF NOT EXISTS :schema.kb_documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_kb_documents_workspace ON :schema.kb_documents (workspace_id);
+
+ALTER TABLE :schema.eval_traces ADD COLUMN IF NOT EXISTS task_id TEXT;
+ALTER TABLE :schema.eval_traces ADD COLUMN IF NOT EXISTS eval_batch_id TEXT;
+ALTER TABLE :schema.eval_traces ADD COLUMN IF NOT EXISTS task_set_hash TEXT;
+ALTER TABLE :schema.eval_traces ADD COLUMN IF NOT EXISTS execution_source TEXT;
+ALTER TABLE :schema.eval_traces ADD COLUMN IF NOT EXISTS eval_scope TEXT;
+ALTER TABLE :schema.eval_traces ALTER COLUMN profile_version_id TYPE TEXT USING profile_version_id::text;

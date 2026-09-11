@@ -52,6 +52,10 @@ export function evaluatePinGate(
   gate: ProfilePinGate = DEFAULT_PROFILE_PIN_GATE,
 ) {
   const reasons: string[] = [];
+  if (!results.length || traces.length !== results.length) reasons.push("incomplete_results");
+  if (traces.some(t => !Number.isFinite(t.latencyMs) || t.latencyMs < 0 ||
+    (t.tokensUsed !== undefined && (!Number.isSafeInteger(t.tokensUsed) || t.tokensUsed < 0))) ||
+    results.some(r => !Number.isFinite(r.score) || r.score < 0 || r.score > 1)) reasons.push("invalid_measurements");
   const passRate =
     results.length === 0 ? 0 : results.filter((r) => r.passed).length / results.length;
   const latencies = traces.map((t) => t.latencyMs);
@@ -86,6 +90,7 @@ export function evaluatePinGate(
 }
 
 export function validateGoldenTaskCount(count: number): { ok: boolean; reason?: string } {
+  if (count > 100) return { ok: false, reason: "requires_at_most_100_golden_tasks" };
   if (count < MIN_GOLDEN_TASKS_FOR_PIN) {
     return {
       ok: false,

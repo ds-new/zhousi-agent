@@ -156,6 +156,7 @@ export interface ModelRoute {
 }
 
 export interface McpBinding {
+  searchTool?: string;
   serverName: string;
   transport: "stdio" | "streamable-http";
   command?: string;
@@ -232,6 +233,7 @@ export interface MemoryGovernancePolicy {
 }
 
 export interface EvalTask {
+  split?: "train" | "holdout";
   id: string;
   profileId: ProfileId;
   input: string;
@@ -311,6 +313,7 @@ export interface McpCatalogEntry {
   command?: string;
   args?: string[];
   url?: string;
+  envRef?: Record<string, string>;
   defaultSensitivity: McpBinding["sensitivity"];
   approvalStatus: McpApprovalStatus;
   createdAt: Date;
@@ -349,6 +352,12 @@ export function defaultWorkspaceAccessPolicy(workspaceId: WorkspaceId): AccessPo
 }
 
 export interface ProfileEvalRun {
+  taskResults?: EvalResult[];
+  workerVersionIds?: Record<string, ProfileVersionId>;
+  evalBatchId?: string;
+  taskSetHash?: string;
+  evidenceExpiresAt?: Date;
+  scope?: "profile" | "multi_agent";
   id: string;
   profileId: ProfileId;
   profileVersionId: ProfileVersionId;
@@ -394,8 +403,8 @@ export function resolveModelRoute(
 }
 
 export function resolveMcpPoolScope(binding: McpBinding): McpPoolScope {
-  if (binding.poolScope) return binding.poolScope;
   if (binding.sensitivity === "high") return "session";
+  if (binding.poolScope) return binding.poolScope;
   if (binding.sensitivity === "readonly") return "tenant";
   return "workspace";
 }

@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createRemoteJWKSet, customFetch, decodeProtectedHeader, jwtVerify } from "jose";
 import type { TenantId, WorkspaceRole } from "@diy-agent/domain";
 
 export const API_KEY_PREFIX = "diy_sk_";
@@ -40,7 +41,7 @@ export function hashApiKey(rawKey: string): string {
 
 export function generateApiKey(tenantId: TenantId, name: string): GeneratedApiKey {
   const secret = randomBytes(24).toString("base64url");
-  const key = `${API_KEY_PREFIX}${secret}`;
+  const key = `${API_KEY_PREFIX}${tenantId}.${secret}`;
   const record: ApiKeyRecord = {
     id: crypto.randomUUID(),
     tenantId,
@@ -85,6 +86,7 @@ export async function authenticateBearer(
   authorization: string | undefined,
   keys: ApiKeyRecord[],
   oidcVerifier?: OidcVerifier,
+  allowDevOidc = false,
 ): Promise<AuthContext | null> {
   const token = parseBearerToken(authorization);
   if (!token) return null;
@@ -104,7 +106,7 @@ export async function authenticateBearer(
     }
   }
 
-  const devClaims = parseDevOidcToken(token);
+  const devClaims = allowDevOidc && !oidcVerifier ? parseDevOidcToken(token) : null;
   if (devClaims) {
     return {
       tenantId: devClaims.tenantId,
@@ -123,8 +125,10 @@ export function authenticateServiceAccount(
 ): boolean {
   const token = parseBearerToken(authorization);
   if (!token || !token.startsWith(SERVICE_ACCOUNT_PREFIX)) return false;
-  if (expectedToken.length !== token.length) return false;
-  return timingSafeEqual(Buffer.from(expectedToken), Buffer.from(token));
+  const expected = Buffer.from(expectedToken);
+  const presented = Buffer.from(token);
+  if (expected.length !== presented.length) return false;
+  return timingSafeEqual(expected, presented);
 }
 
 export function generateServiceAccountToken(): string {
@@ -137,67 +141,56 @@ export function authenticatePlatformAdmin(
 ): boolean {
   const token = parseBearerToken(authorization);
   if (!token || !token.startsWith(PLATFORM_ADMIN_PREFIX)) return false;
-  if (expectedToken.length !== token.length) return false;
-  return timingSafeEqual(Buffer.from(expectedToken), Buffer.from(token));
+  const expected = Buffer.from(expectedToken);
+  const presented = Buffer.from(token);
+  if (expected.length !== presented.length) return false;
+  return timingSafeEqual(expected, presented);
 }
 
 export interface JwksOidcConfig {
   issuer: string;
-  audience?: string;
-  /** HS256 secrets keyed by JWT `kid` for dev/test JWKS flows. */
+  audience: string | string[];
+  /** Operator-configured HTTPS JWKS endpoint; JWT-supplied jku/x5u URLs are never used. */
+  jwksUrl?: string;
+  algorithms?: Array<"RS256" | "PS256" | "ES256" | "EdDSA">;
+  /** Explicit development-only symmetric keys. Never combined with remote JWKS. */
   hs256Secrets?: Record<string, string>;
+  allowDevHs256?: boolean;
+  /** Dependency injection for integration tests or an operator-managed fetch implementation. */
+  fetchImpl?: typeof fetch;
 }
 
-function verifyHs256Jwt(token: string, secret: string): Record<string, unknown> | null {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [headerB64, payloadB64, signatureB64] = parts;
-  const data = `${headerB64}.${payloadB64}`;
-  const expected = createHmac("sha256", secret).update(data).digest("base64url");
-  try {
-    if (
-      signatureB64!.length !== expected.length ||
-      !timingSafeEqual(Buffer.from(signatureB64!), Buffer.from(expected))
-    ) {
-      return null;
-    }
-  } catch {
-    return null;
-  }
-  try {
-    return JSON.parse(Buffer.from(payloadB64!, "base64url").toString("utf8")) as Record<
-      string,
-      unknown
-    >;
-  } catch {
-    return null;
-  }
-}
-
+/** Standard JOSE verification; construct once to preserve key caching and rotation cooldown. */
 export function createJwksOidcVerifier(config: JwksOidcConfig): OidcVerifier {
+  if (!config.issuer || !config.audience || (Array.isArray(config.audience) && !config.audience.length)) throw new Error("oidc_issuer_and_audience_required");
+  if (config.hs256Secrets && !config.allowDevHs256) throw new Error("oidc_dev_hs256_not_enabled");
+  if (config.hs256Secrets && config.jwksUrl) throw new Error("oidc_key_sources_must_be_distinct");
+  const algorithms = config.hs256Secrets ? ["HS256"] : config.algorithms ?? ["RS256", "PS256", "ES256", "EdDSA"];
+  if (!config.hs256Secrets && (!algorithms.length || algorithms.some(alg => !["RS256", "PS256", "ES256", "EdDSA"].includes(alg)))) throw new Error("oidc_algorithm_not_allowed");
+  let remote: ReturnType<typeof createRemoteJWKSet> | undefined;
+  if (config.jwksUrl) {
+    const url = new URL(config.jwksUrl);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error("oidc_jwks_https_required");
+    remote = createRemoteJWKSet(url, { timeoutDuration: 5000, cooldownDuration: 30_000, cacheMaxAge: 600_000,
+      ...(config.fetchImpl ? { [customFetch]: config.fetchImpl } : {}) });
+  } else if (!config.hs256Secrets) throw new Error("oidc_jwks_url_required");
   return async (token: string): Promise<OidcClaims | null> => {
-    const headerPart = token.split(".")[0];
-    if (!headerPart) return null;
-    let header: { alg?: string; kid?: string };
+    if (!token || token.length > 16_384) return null;
     try {
-      header = JSON.parse(Buffer.from(headerPart, "base64url").toString("utf8")) as {
-        alg?: string;
-        kid?: string;
-      };
-    } catch {
-      return null;
-    }
-    if (header.alg !== "HS256" || !header.kid) return null;
-    const secret = config.hs256Secrets?.[header.kid];
-    if (!secret) return null;
-    const payload = verifyHs256Jwt(token, secret);
-    if (!payload) return null;
-    if (payload.iss !== config.issuer) return null;
-    if (config.audience && payload.aud !== config.audience) return null;
-    const tenantId = (payload.tenant_id ?? payload.tenantId) as TenantId | undefined;
-    const sub = payload.sub as string | undefined;
-    if (!tenantId || !sub) return null;
-    return { tenantId, sub, email: payload.email as string | undefined };
+      const options = { issuer: config.issuer, audience: config.audience, algorithms, requiredClaims: ["exp", "iat", "sub"] };
+      let payload: import("jose").JWTPayload;
+      if (remote) ({ payload } = await jwtVerify(token, remote, options));
+      else {
+        const header = decodeProtectedHeader(token);
+        const secret = header.kid && Object.hasOwn(config.hs256Secrets!, header.kid) ? config.hs256Secrets![header.kid] : undefined;
+        if (!secret) return null;
+        ({ payload } = await jwtVerify(token, new TextEncoder().encode(secret), options));
+      }
+      const tenantId = payload.tenant_id ?? payload.tenantId;
+      if (typeof tenantId !== "string" || !tenantId || tenantId.length > 256 || typeof payload.sub !== "string" || !payload.sub || payload.sub.length > 512) return null;
+      if (typeof payload.iat !== "number" || payload.iat > Math.floor(Date.now() / 1000)) return null;
+      return { tenantId: tenantId as TenantId, sub: payload.sub, email: typeof payload.email === "string" ? payload.email : undefined };
+    } catch { return null; }
   };
 }
 
@@ -209,7 +202,8 @@ export function signDevHs256Jwt(
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT", kid })).toString(
     "base64url",
   );
-  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const payload = Buffer.from(JSON.stringify({ iat: now, exp: now + 3600, ...claims })).toString("base64url");
   const data = `${header}.${payload}`;
   const signature = createHmac("sha256", secret).update(data).digest("base64url");
   return `${data}.${signature}`;

@@ -60,4 +60,4 @@ def propose_mutations(body: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
             **first,
             "after": f"{first.get('after', '')}\n\nDSPy hint: {hint[:240]}",
         }
-    return mutations, "dspy"
+    return mutations, "dspy" if hint and mutations else "heuristic"

@@ -1,0 +1,48 @@
+# Standalone production configuration; do not merge with docker-compose.yml.
+# CP and DP are ordinarily deployed in separate trust domains. The images must be reviewed immutable references.
+x-security: &security
+  read_only: true
+  user: "1000:1000"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+  restart: unless-stopped
+  pids_limit: 128
+  mem_limit: 512m
+  cpus: 1.0
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+  stop_grace_period: 180s
+
+services:
+  control-plane:
+    <<: *security
+    image: ${DIY_CONTROL_PLANE_IMAGE:?Set immutable DIY_CONTROL_PLANE_IMAGE}
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set production control-plane DATABASE_URL}
+      DIY_ALLOW_INSECURE_DEV: "false"
+      DIY_PLATFORM_ADMIN_KEY: ${DIY_PLATFORM_ADMIN_KEY:?Set unique admin token at least 32 characters}
+      DIY_EVOLUTION_INTERNAL_TOKEN: ${DIY_EVOLUTION_INTERNAL_TOKEN:?Set unique evolution token at least 32 characters}
+      DIY_TENANT_SERVICES: ${DIY_TENANT_SERVICES:?Set tenant routing JSON, initially an empty object is valid}
+      DIY_EVOLUTION_URL: http://evolution:9880
+      DIY_OIDC_ISSUER: ${DIY_OIDC_ISSUER:-}
+      DIY_OIDC_AUDIENCE: ${DIY_OIDC_AUDIENCE:-}
+      DIY_OIDC_JWKS_URL: ${DIY_OIDC_JWKS_URL:-}
+      DIY_WEBHOOK_ALLOWED_ORIGINS: ${DIY_WEBHOOK_ALLOWED_ORIGINS:-}
+      DIY_EVOLUTION_INTERVAL_MS: ${DIY_EVOLUTION_INTERVAL_MS:-0}
+    ports: ["127.0.0.1:9878:9878"]
+    networks: [control, outbound]
+    depends_on:
+      evolution: {condition: service_healthy}
+
+  evolution:
+    <<: *security
+    image: ${DIY_EVOLUTION_IMAGE:?Set immutable DIY_EVOLUTION_IMAGE}
+    environment:
+      DIY_ALLOW_INSECURE_DEV: "false"
+      DIY_EVOLUTION_INTERNAL_TOKEN: ${DIY_EVOLUTION_INTERNAL_TOKEN:?Set unique evolution token at least 32 characters}
+    networks: [control]
+
+
+networks:
+  control: {internal: true}
+  outbound: {}

@@ -33,121 +33,53 @@ export interface Orchestrator {
   execute(plan: OrchestrationPlan): Promise<OrchestrationResult>;
 }
 
-export class SupervisorOrchestrator implements Orchestrator {
-  plan(userGoal: string, config: OrchestrationConfig, supervisorId: ProfileId): OrchestrationPlan {
-    const workers = config.workerProfileIds ?? [];
-    const subtasks = decomposeGoal(userGoal, workers.length || 1);
-    const tasks = subtasks.map((instruction, i) => ({
-      workerProfileId: workers[i] ?? (`worker-${i}` as ProfileId),
-      instruction,
-      status: "pending" as const,
-    }));
-    return { topology: "supervisor", supervisorProfileId: supervisorId, tasks };
-  }
+export type WorkerExecutor = (task: Readonly<WorkerTask>, context: string) => Promise<string>;
 
-  async execute(plan: OrchestrationPlan): Promise<OrchestrationResult> {
-    const handoffs: OrchestrationResult["handoffs"] = [];
-    const outputs: string[] = [];
-    const supervisor = plan.supervisorProfileId!;
-    for (const task of plan.tasks) {
-      const start = Date.now();
-      task.status = "running";
-      handoffs.push({
-        from: supervisor,
-        to: task.workerProfileId,
-        latencyMs: Date.now() - start,
-      });
-      task.output = `[${task.workerProfileId}] ${task.instruction}`;
-      task.status = "done";
-      outputs.push(task.output);
-    }
-    return {
-      plan,
-      finalOutput: outputs.join("\n\n"),
-      handoffs,
-      metrics: buildMetrics(plan, handoffs),
+class ExecutingOrchestrator implements Orchestrator {
+  constructor(private topology: OrchestrationTopology, private executor?: WorkerExecutor) {}
+
+  plan(userGoal: string, config: OrchestrationConfig, supervisorId: ProfileId): OrchestrationPlan {
+    const workers = config.workerProfileIds?.length ? config.workerProfileIds : [supervisorId];
+    if (workers.length > 32) throw new Error("orchestration_worker_limit");
+    return { topology: this.topology, supervisorProfileId: supervisorId,
+      tasks: workers.map((id, i) => ({ workerProfileId: id, instruction: this.topology === "pipeline" ? `Stage ${i + 1}: ${userGoal}` : userGoal, status: "pending" })),
     };
   }
-}
-
-export class PipelineOrchestrator implements Orchestrator {
-  plan(userGoal: string, config: OrchestrationConfig, supervisorId: ProfileId): OrchestrationPlan {
-    const workers = config.workerProfileIds ?? [];
-    const defaultStages = ["retrieve", "analyze", "respond"];
-    const stages = workers.length ? defaultStages.slice(0, workers.length) : defaultStages;
-    const tasks = stages.map((stage, i) => ({
-      workerProfileId: workers[i] ?? (`pipeline-${stage}` as ProfileId),
-      instruction: `${stage}: ${userGoal}`,
-      status: "pending" as const,
-    }));
-    return { topology: "pipeline", supervisorProfileId: supervisorId, tasks };
-  }
 
   async execute(plan: OrchestrationPlan): Promise<OrchestrationResult> {
-    let context = "";
+    if (!this.executor) throw new Error("worker_executor_required");
     const handoffs: OrchestrationResult["handoffs"] = [];
-    let prev: ProfileId | string = plan.supervisorProfileId!;
+    const outputs: string[] = [];
+    let previous = plan.supervisorProfileId! as string;
     for (const task of plan.tasks) {
-      const start = Date.now();
+      const start = performance.now();
       task.status = "running";
-      handoffs.push({ from: prev, to: task.workerProfileId, latencyMs: 0 });
-      task.output = `${task.instruction}${context ? `\ncontext: ${context.slice(0, 80)}` : ""}`;
-      context = task.output;
-      task.status = "done";
-      handoffs[handoffs.length - 1]!.latencyMs = Date.now() - start;
-      prev = task.workerProfileId;
-    }
-    return { plan, finalOutput: context, handoffs, metrics: buildMetrics(plan, handoffs) };
-  }
-}
-
-export class BlackboardOrchestrator implements Orchestrator {
-  plan(userGoal: string, config: OrchestrationConfig, supervisorId: ProfileId): OrchestrationPlan {
-    const workers = config.workerProfileIds ?? [];
-    const tasks = (workers.length ? workers : [("bb-1" as ProfileId)]).map((id) => ({
-      workerProfileId: id,
-      instruction: `Contribute to shared goal: ${userGoal}`,
-      status: "pending" as const,
-    }));
-    return { topology: "blackboard", supervisorProfileId: supervisorId, tasks };
-  }
-
-  async execute(plan: OrchestrationPlan): Promise<OrchestrationResult> {
-    const board: string[] = [];
-    const handoffs: OrchestrationResult["handoffs"] = [];
-    await Promise.all(
-      plan.tasks.map(async (task) => {
-        const start = Date.now();
-        task.status = "running";
-        task.output = `[blackboard] ${task.instruction}`;
-        board.push(task.output);
+      const context = this.topology === "pipeline" ? outputs.at(-1) ?? "" : outputs.join("\n\n");
+      try {
+        task.output = await this.executor(task, context);
+        if (typeof task.output !== "string" || !task.output.trim()) throw new Error("worker_empty_output");
         task.status = "done";
-        handoffs.push({
-          from: plan.supervisorProfileId!,
-          to: task.workerProfileId,
-          latencyMs: Date.now() - start,
-        });
-      }),
-    );
-    return { plan, finalOutput: board.join("\n---\n"), handoffs, metrics: buildMetrics(plan, handoffs) };
+        outputs.push(task.output);
+      } catch (error) { task.status = "failed"; throw error; }
+      handoffs.push({ from: previous, to: task.workerProfileId, latencyMs: performance.now() - start });
+      previous = task.workerProfileId;
+    }
+    return { plan, finalOutput: this.topology === "pipeline" ? outputs.at(-1) ?? "" : outputs.join("\n\n"), handoffs, metrics: buildMetrics(plan, handoffs) };
   }
 }
 
-export function createOrchestrator(topology: OrchestrationTopology): Orchestrator {
-  switch (topology) {
-    case "pipeline":
-      return new PipelineOrchestrator();
-    case "blackboard":
-      return new BlackboardOrchestrator();
-    case "supervisor":
-    default:
-      return new SupervisorOrchestrator();
-  }
+export class SupervisorOrchestrator extends ExecutingOrchestrator {
+  constructor(executor?: WorkerExecutor) { super("supervisor", executor); }
 }
-
-function decomposeGoal(goal: string, count: number): string[] {
-  if (count <= 1) return [goal];
-  return Array.from({ length: count }, (_, i) => `Subtask ${i + 1}/${count}: ${goal}`);
+export class PipelineOrchestrator extends ExecutingOrchestrator {
+  constructor(executor?: WorkerExecutor) { super("pipeline", executor); }
+}
+export class BlackboardOrchestrator extends ExecutingOrchestrator {
+  constructor(executor?: WorkerExecutor) { super("blackboard", executor); }
+}
+export function createOrchestrator(topology: OrchestrationTopology, executor?: WorkerExecutor): Orchestrator {
+  if (!["supervisor", "pipeline", "blackboard"].includes(topology)) throw new Error("invalid_orchestration_topology");
+  return new ExecutingOrchestrator(topology, executor);
 }
 
 function buildMetrics(

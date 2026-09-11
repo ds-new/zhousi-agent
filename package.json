@@ -10,10 +10,15 @@
   "scripts": {
     "build": "npm run build -w @diy-agent/domain && npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run build && node --import tsx --test packages/domain/test/**/*.test.ts packages/auth/test/**/*.test.ts packages/eval-harness/test/**/*.test.ts packages/kb-rag/test/**/*.test.ts packages/db/test/**/*.test.ts packages/orchestrator/test/**/*.test.ts packages/dsh-memory-plugin/test/**/*.test.ts packages/dsh-vault-plugin/test/**/*.test.ts packages/dsh-profile-sync-plugin/test/**/*.test.ts packages/dsh-policy-plugin/test/**/*.test.ts packages/dsh-trace-plugin/test/**/*.test.ts packages/dsh-bootstrap-plugin/test/**/*.test.ts packages/dsh-kb-plugin/test/**/*.test.ts services/data-plane/test/**/*.test.ts services/control-plane/test/**/*.test.ts",
+    "test:python": "python3 -m unittest discover -s services/evolution -p 'test_*.py'",
+    "test:postgres": "node --import tsx --test packages/db/test/postgres-persistence.integration.ts",
+    "bench:runtime": "node --import tsx scripts/benchmark-runtime.mts",
+    "test": "npm run build && node --import tsx --test packages/domain/test/**/*.test.ts packages/auth/test/**/*.test.ts packages/eval-harness/test/**/*.test.ts packages/kb-rag/test/**/*.test.ts packages/db/test/**/*.test.ts packages/orchestrator/test/**/*.test.ts packages/dsh-mcp-pool-plugin/test/**/*.test.ts packages/dsh-memory-plugin/test/**/*.test.ts packages/dsh-vault-plugin/test/**/*.test.ts packages/dsh-profile-sync-plugin/test/**/*.test.ts packages/dsh-policy-plugin/test/**/*.test.ts packages/dsh-trace-plugin/test/**/*.test.ts packages/dsh-bootstrap-plugin/test/**/*.test.ts packages/dsh-kb-plugin/test/**/*.test.ts services/data-plane/test/**/*.test.ts services/control-plane/test/**/*.test.ts",
     "dev:control-plane": "npm run dev -w @diy-agent/control-plane",
     "dev:evolution": "cd services/evolution && PYTHONPATH=. python3 server.py",
-    "dev:data-plane": "npm run start -w @diy-agent/data-plane"
+    "dev:data-plane": "npm run start -w @diy-agent/data-plane",
+    "test:postgres:runtime": "node --import tsx --test services/data-plane/test/*.integration.ts",
+    "test:postgres:kb": "node --import tsx --test packages/dsh-kb-plugin/test/postgres-routing.integration.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

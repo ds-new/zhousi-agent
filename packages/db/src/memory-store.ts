@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DEFAULT_EVOLUTION_SIGNAL_THRESHOLD,
   SESSION_TOKEN_TTL_MS,
@@ -45,6 +46,7 @@ import type {
 import { defaultGateway } from "./types.js";
 import { generateApiKey, type ApiKeyRecord, type WorkspaceMemberRecord } from "@diy-agent/auth";
 import type { AccessPolicy, WorkspaceId, WorkspaceRole } from "@diy-agent/domain";
+import { STATE_MAPS, type StoreState } from "./persistent-state.js";
 
 interface RateWindow {
   count: number;
@@ -52,6 +54,44 @@ interface RateWindow {
 }
 
 export class MemoryStore implements ControlPlaneStore {
+  async health():Promise<void> {}
+  private readonly leases = new Set<string>();
+
+  async withLease<T>(key: string, operation: () => Promise<T>): Promise<T | null> {
+    if (!key || key.length > 512) throw new Error("invalid_lease_key");
+    if (this.leases.has(key)) return null;
+    this.leases.add(key);
+    try { return await operation(); }
+    finally { this.leases.delete(key); }
+  }
+  protected tenantState(tenantId: string): StoreState {
+    const owner = (key: string, value: unknown): boolean => {
+      if (key === tenantId) return true;
+      const item = value as { tenantId?: string; workspaceId?: string; profileId?: string; id?: string };
+      if (item.tenantId) return item.tenantId === tenantId;
+      const workspaceId = item.workspaceId ?? (item.profileId ? this.profiles.get(item.profileId)?.workspaceId : undefined);
+      return Boolean(workspaceId && this.workspaces.get(workspaceId)?.tenantId === tenantId);
+    };
+    const maps: StoreState["maps"] = {};
+    for (const field of STATE_MAPS) {
+      const map = this[field] as Map<string, unknown>;
+      maps[field] = [...map.entries()].filter(([key, value]) => owner(key, value));
+    }
+    return { maps, warnings: [...this.quotaWarningsDispatched].filter(key => key.startsWith(`${tenantId}:`)) };
+  }
+
+  protected resetPersistentState(): void {
+    for (const field of STATE_MAPS) this[field].clear();
+    this.quotaWarningsDispatched.clear();
+  }
+
+  protected restoreTenantState(state: StoreState): void {
+    for (const field of STATE_MAPS) {
+      const map = this[field] as Map<string, unknown>;
+      for (const [key, value] of state.maps[field] ?? []) map.set(key, value);
+    }
+    for (const key of state.warnings) this.quotaWarningsDispatched.add(key);
+  }
   protected tenants = new Map<string, Tenant>();
   protected workspaces = new Map<string, import("@diy-agent/domain").Workspace>();
   protected profiles = new Map<string, AgentProfile>();
@@ -73,12 +113,17 @@ export class MemoryStore implements ControlPlaneStore {
   protected profileEvalRuns = new Map<string, ProfileEvalRun>();
   protected kbDocumentRegistry = new Map<string, KbDocumentRegistryEntry>();
   protected webhooks = new Map<string, WebhookRegistration>();
-  protected sessionTokens = new Map<string, { workspaceId: string; expiresAt: number }>();
+  protected sessionTokens = new Map<string, { sessionId: string; workspaceId: string; expiresAt: number }>();
   protected tokenUsageByTenant = new Map<string, { day: string; tokens: number }>();
   protected rateWindows = new Map<string, RateWindow>();
+  protected usageEvents = new Map<string, { tenantId: string; tokens: number; createdAt: Date }>();
 
   async getProfile(id: ProfileId): Promise<AgentProfile | null> {
-    return this.profiles.get(id) ?? null;
+    return structuredClone(this.profiles.get(id) ?? null);
+  }
+
+  async getWorkspace(id: WorkspaceId) {
+    return this.workspaces.get(id) ?? null;
   }
 
   async getTenantForProfile(profileId: ProfileId): Promise<Tenant | null> {
@@ -95,7 +140,7 @@ export class MemoryStore implements ControlPlaneStore {
   ): Promise<AgentProfileVersion | null> {
     const version = this.profileVersions.get(versionId);
     if (!version || version.profileId !== profileId) return null;
-    return version;
+    return structuredClone(version);
   }
 
   async getLatestProfileVersion(profileId: ProfileId): Promise<AgentProfileVersion | null> {
@@ -107,20 +152,35 @@ export class MemoryStore implements ControlPlaneStore {
   async pinProfile(
     profileId: ProfileId,
     versionId: AgentProfileVersion["id"],
+    evidence?: { taskSetHash: string; evalBatchId: string },
   ): Promise<AgentProfile | null> {
     const profile = this.profiles.get(profileId);
     const version = this.profileVersions.get(versionId);
     if (!profile || !version || version.profileId !== profileId) return null;
+    if (version.approvalStatus !== "approved") return null;
+    if (evidence) {
+      const tasks = [...this.goldenTasks.values()].filter(t => t.profileId === profileId).sort((a, b) => a.id.localeCompare(b.id));
+      const hash = createHash("sha256").update(JSON.stringify({ tasks, snapshot: version.snapshot })).digest("hex");
+      const latest = [...this.traces.values()].filter(t => t.profileId === profileId && t.profileVersionId === versionId && t.evalScope === "profile")
+        .sort((a, b) => (b.evalBatchId ?? "").localeCompare(a.evalBatchId ?? ""))[0];
+      if (hash !== evidence.taskSetHash || latest?.evalBatchId !== evidence.evalBatchId ||
+        Date.now() - latest.createdAt.getTime() > 24 * 3600_000) return null;
+    }
+    const evolution = [...this.evolutionRuns.values()].find(run => run.candidateVersionId === versionId);
+    if (evolution && profile.pinnedVersionId && profile.pinnedVersionId !== evolution.baseVersionId && profile.pinnedVersionId !== versionId) return null;
     profile.pinnedVersionId = versionId;
     return profile;
   }
 
   async createTenant(input: CreateTenantInput): Promise<Tenant> {
+    if (input.dbSchema && (!/^[a-z_][a-z0-9_]{0,47}$/.test(input.dbSchema) || /^(public|platform|pg_)/.test(input.dbSchema) || [...this.tenants.values()].some(t => t.dbSchema === input.dbSchema))) {
+      throw new Error("tenant_schema_invalid_or_in_use");
+    }
     const id = crypto.randomUUID() as Tenant["id"];
     const tenant: Tenant = {
       id,
       name: input.name ?? "unnamed",
-      dbSchema: input.dbSchema ?? `tenant_${id.slice(0, 8)}`,
+      dbSchema: input.dbSchema ?? `tenant_${id.replaceAll("-", "")}`,
       isolationMode: input.isolationMode ?? "schema",
       gateway: defaultGateway(input.gateway),
       createdAt: new Date(),
@@ -132,6 +192,8 @@ export class MemoryStore implements ControlPlaneStore {
   async getTenant(id: Tenant["id"]): Promise<Tenant | null> {
     return this.tenants.get(id) ?? null;
   }
+
+  async listTenants(): Promise<Tenant[]> { return structuredClone([...this.tenants.values()]); }
 
   async updateTenantGateway(id: Tenant["id"], gateway: TenantGateway): Promise<Tenant | null> {
     const tenant = this.tenants.get(id);
@@ -158,11 +220,11 @@ export class MemoryStore implements ControlPlaneStore {
   }
 
   async createProfile(input: CreateProfileInput) {
-    if (!this.workspaces.has(input.workspaceId)) return null;
+    if (this.workspaces.get(input.workspaceId)?.tenantId !== input.tenantId) return null;
     const tenant = this.tenants.get(input.tenantId);
     if (!tenant) return null;
 
-    const body = input.profile;
+    const body = structuredClone(input.profile);
     const modelRoute = body.modelRoute ?? {
       provider: "openai",
       model: "gpt-4o-mini",
@@ -191,7 +253,7 @@ export class MemoryStore implements ControlPlaneStore {
       id: versionId,
       profileId,
       version: 1,
-      snapshot: { ...profile },
+      snapshot: structuredClone(profile),
       createdAt: new Date(),
       approvalStatus: "approved",
     };
@@ -208,6 +270,13 @@ export class MemoryStore implements ControlPlaneStore {
     const rate = this.checkRateLimit(tenantId, tenant.gateway.rateLimitRpm ?? 600);
     if (!rate.allowed) return rate;
 
+    return this.tokenQuota(tenantId);
+  }
+
+  private tokenQuota(tenantId: Tenant["id"]): QuotaCheckResult {
+    const tenant = this.tenants.get(tenantId);
+    if (!tenant) return { allowed: false, reason: "tenant_not_found" };
+
     const usage = this.getTokenUsage(tenantId);
     const max = tenant.gateway.maxTokensPerDay;
     if (max !== undefined && usage.tokens >= max) {
@@ -220,10 +289,27 @@ export class MemoryStore implements ControlPlaneStore {
   }
 
   async recordTokenUsage(tenantId: Tenant["id"], tokens: number): Promise<QuotaCheckResult> {
+    if (!Number.isSafeInteger(tokens) || tokens < 0) throw new Error("invalid_token_usage");
+    if (!this.tenants.has(tenantId)) return { allowed: false, reason: "tenant_not_found" };
     const usage = this.getTokenUsage(tenantId);
     usage.tokens += tokens;
     this.tokenUsageByTenant.set(tenantId, usage);
-    return this.checkSessionQuota(tenantId);
+    return this.tokenQuota(tenantId);
+  }
+
+  async recordUsageOnce(tenantId: Tenant["id"], eventId: string, tokens: number): Promise<{ duplicate: boolean; quota: QuotaCheckResult }> {
+    if (!Number.isSafeInteger(tokens) || tokens < 0) throw new Error("invalid_token_usage");
+    if (!eventId || eventId.length > 256) throw new Error("invalid_usage_event_id");
+    if (!this.tenants.has(tenantId)) throw new Error("tenant_not_found");
+    const key = JSON.stringify([tenantId, eventId]);
+    const previous = this.usageEvents.get(key);
+    if (previous) {
+      if (previous.tokens !== tokens) throw new Error("usage_event_conflict");
+      return { duplicate: true, quota: this.tokenQuota(tenantId) };
+    }
+    // Set before yielding so the development store also makes concurrent replays idempotent.
+    this.usageEvents.set(key, { tenantId, tokens, createdAt: new Date() });
+    return { duplicate: false, quota: await this.recordTokenUsage(tenantId, tokens) };
   }
 
   async createSession(input: CreateSessionInput): Promise<SessionCreateResult | null> {
@@ -251,6 +337,7 @@ export class MemoryStore implements ControlPlaneStore {
     const sessionToken = `sess_${crypto.randomUUID().replace(/-/g, "")}`;
     const expiresAt = Date.now() + SESSION_TOKEN_TTL_MS;
     this.sessionTokens.set(sessionToken, {
+      sessionId,
       workspaceId: profile.workspaceId,
       expiresAt,
     });
@@ -285,12 +372,20 @@ export class MemoryStore implements ControlPlaneStore {
     return entry;
   }
 
+  async resolveSession(sessionId: string, token: string) {
+    const auth = this.sessionTokens.get(token);
+    const session = this.sessions.get(sessionId);
+    if (!auth || auth.expiresAt <= Date.now() || auth.sessionId !== sessionId || !session || auth.workspaceId !== session.workspaceId) return null;
+    const ws = this.workspaces.get(session.workspaceId);
+    return ws ? { session: structuredClone(session), tenantId: ws.tenantId } : null;
+  }
+
   async listGoldenTasks(profileId: ProfileId): Promise<EvalTask[]> {
     return [...this.goldenTasks.values()].filter((t) => t.profileId === profileId);
   }
 
   async saveTrace(trace: Omit<EvalTraceRecord, "id" | "createdAt">): Promise<EvalTraceRecord> {
-    this.purgeExpiredTraces();
+    this.purgeExpiredTraces(new Date(), trace.profileId);
     const entry: EvalTraceRecord = {
       ...trace,
       id: crypto.randomUUID(),
@@ -300,8 +395,9 @@ export class MemoryStore implements ControlPlaneStore {
     return entry;
   }
 
-  protected purgeExpiredTraces(now = new Date()): void {
+  protected purgeExpiredTraces(now = new Date(), profileId?: ProfileId): void {
     for (const [id, trace] of this.traces) {
+      if (profileId && trace.profileId !== profileId) continue;
       if (isTraceExpired(trace.createdAt, now)) {
         this.traces.delete(id);
       }
@@ -541,7 +637,8 @@ export class MemoryStore implements ControlPlaneStore {
     const ws = this.workspaces.get(profile.workspaceId);
     if (!ws || ws.tenantId !== input.tenantId) return null;
 
-    const tier = input.tier ?? profile.governanceTier;
+    let tier = input.tier ?? profile.governanceTier;
+    if (input.target === "prompt" && tier !== "L3") tier = "L2";
     if (tier === "L3") throw new Error("evolution_tier_forbidden");
 
     let target = input.target ?? "skill";
@@ -560,6 +657,9 @@ export class MemoryStore implements ControlPlaneStore {
       }
     }
 
+    // Repeat after all awaited validation; creation is atomic in MemoryStore and inside the SQL catalog lock.
+    if ([...this.evolutionRuns.values()].some(run => run.profileId === profile.id &&
+      (run.status === "running" || run.status === "awaiting_review"))) return null;
     const run: EvolutionRun = {
       id: crypto.randomUUID(),
       profileId: profile.id,
@@ -595,17 +695,28 @@ export class MemoryStore implements ControlPlaneStore {
       tier: profile.governanceTier,
       target: "mcp_description",
     });
-    return run!;
+    return run ?? { skipped: true as const, reason: "evolution_already_active" };
   }
 
   async finalizeEvolutionFromService(input: FinalizeEvolutionInput): Promise<EvolutionRun | null> {
     const run = this.evolutionRuns.get(input.runId);
     if (!run) return null;
+    const candidateIdRequested = input.candidateVersionId ?? run.candidateVersionId;
+    const existingCandidate = candidateIdRequested ? this.profileVersions.get(candidateIdRequested) : undefined;
+    if (existingCandidate && existingCandidate.profileId !== run.profileId) return null;
+    if (existingCandidate && candidateIdRequested !== run.candidateVersionId) return null;
+    if (input.candidateVersionId && run.candidateVersionId && input.candidateVersionId !== run.candidateVersionId) return null;
     const profile = this.profiles.get(run.profileId);
     if (!profile) return null;
     const ws = this.workspaces.get(profile.workspaceId);
     if (!ws || ws.tenantId !== input.tenantId) return null;
 
+    // Replayed callbacks cannot rewrite an immutable candidate or resurrect a terminal run.
+    if (run.candidateVersionId || ["completed", "failed", "rejected"].includes(run.status)) return structuredClone(run);
+    if (profile.pinnedVersionId && profile.pinnedVersionId !== run.baseVersionId) {
+      run.status = "failed";
+      return structuredClone(run);
+    }
     run.evalScoreDelta = input.evalScoreDelta;
     run.mutations = input.mutations;
     run.gepaRounds = input.gepaRounds;
@@ -621,6 +732,9 @@ export class MemoryStore implements ControlPlaneStore {
     const baseVersion = this.profileVersions.get(run.baseVersionId);
     if (!baseVersion) return null;
 
+    // Derive review requirements from actual mutation paths, never the sidecar's tier label.
+    if (input.mutations?.some(m => m.path === "prompt/system" || m.path.startsWith("skills/") ||
+      (m.path.startsWith("mcp/") && !baseVersion.snapshot.mcpBindings.some(b => m.path === `mcp/${b.serverName}/description`)))) run.tier = "L2";
     let snapshot = structuredClone(baseVersion.snapshot);
     if (input.mutations?.length) {
       snapshot = applyEvolutionMutations(snapshot, input.mutations);
@@ -638,7 +752,7 @@ export class MemoryStore implements ControlPlaneStore {
         version: baseVersion.version + 1,
         snapshot,
         createdAt: new Date(),
-        approvalStatus: run.tier === "L2" ? "pending" : "approved",
+        approvalStatus: run.tier === "L2" || input.status === "awaiting_review" ? "pending" : "approved",
       });
     }
 
@@ -667,6 +781,11 @@ export class MemoryStore implements ControlPlaneStore {
   async approveEvolutionRun(input: ApproveEvolutionInput): Promise<EvolutionRun | null> {
     const run = this.evolutionRuns.get(input.runId);
     if (!run || run.status !== "awaiting_review") return null;
+    if (!run.candidateVersionId) return null;
+    if (input.candidateVersionId && run.candidateVersionId && input.candidateVersionId !== run.candidateVersionId) return null;
+    const selectedCandidateId = input.candidateVersionId ?? run.candidateVersionId;
+    const requestedCandidate = selectedCandidateId ? this.profileVersions.get(selectedCandidateId) : undefined;
+    if (requestedCandidate && requestedCandidate.profileId !== run.profileId) return null;
     const profile = this.profiles.get(run.profileId);
     if (!profile) return null;
     const ws = this.workspaces.get(profile.workspaceId);
@@ -705,13 +824,15 @@ export class MemoryStore implements ControlPlaneStore {
 
   async rejectEvolutionRun(input: RejectEvolutionInput): Promise<EvolutionRun | null> {
     const run = this.evolutionRuns.get(input.runId);
-    if (!run || run.status !== "awaiting_review") return null;
+    if (!run || (run.status !== "awaiting_review" && run.status !== "running")) return null;
     const profile = this.profiles.get(run.profileId);
     if (!profile) return null;
     const ws = this.workspaces.get(profile.workspaceId);
     if (!ws || ws.tenantId !== input.tenantId) return null;
 
     run.status = "rejected";
+    const candidate = run.candidateVersionId ? this.profileVersions.get(run.candidateVersionId) : undefined;
+    if (candidate?.profileId === profile.id) candidate.approvalStatus = "rejected";
     await this.appendAudit({
       tenantId: input.tenantId,
       workspaceId: profile.workspaceId,
@@ -733,6 +854,11 @@ export class MemoryStore implements ControlPlaneStore {
 
   async listApiKeys(tenantId: Tenant["id"]): Promise<ApiKeyRecord[]> {
     return [...this.apiKeys.values()].filter((key) => key.tenantId === tenantId);
+  }
+
+  async revokeApiKey(tenantId: Tenant["id"], keyId: string): Promise<boolean> {
+    if (this.apiKeys.get(keyId)?.tenantId !== tenantId) return false;
+    return this.apiKeys.delete(keyId);
   }
 
   async listAllApiKeys(): Promise<ApiKeyRecord[]> {

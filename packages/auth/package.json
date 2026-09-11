@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@diy-agent/domain": "*"
+    "@diy-agent/domain": "*",
+    "jose": "^6.2.12"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

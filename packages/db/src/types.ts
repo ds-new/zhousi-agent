@@ -101,6 +101,11 @@ export interface FinalizeEvolutionInput {
 }
 
 export interface EvalTraceRecord {
+  taskSetHash?: string;
+  executionSource?: "agent_runner";
+  evalScope?: "profile" | "training" | "holdout";
+  taskId?: string;
+  evalBatchId?: string;
   id: string;
   profileId: ProfileId;
   profileVersionId: AgentProfileVersion["id"];
@@ -126,10 +131,16 @@ export interface QuotaCheckResult {
 }
 
 export interface ControlPlaneStore {
+  health():Promise<void>;
+  withLease<T>(key: string, operation: () => Promise<T>): Promise<T | null>;
+  recordUsageOnce(tenantId: Tenant["id"], eventId: string, tokens: number): Promise<{ duplicate: boolean; quota: QuotaCheckResult }>;
+  resolveSession(sessionId: string, token: string): Promise<{ session: import("@diy-agent/domain").Session; tenantId: Tenant["id"] } | null>;
   createTenant(input: CreateTenantInput): Promise<Tenant>;
   getTenant(id: Tenant["id"]): Promise<Tenant | null>;
+  listTenants(): Promise<Tenant[]>;
   updateTenantGateway(id: Tenant["id"], gateway: TenantGateway): Promise<Tenant | null>;
   createWorkspace(input: CreateWorkspaceInput): Promise<Workspace | null>;
+  getWorkspace(id: Workspace["id"]): Promise<Workspace | null>;
   createProfile(input: CreateProfileInput): Promise<{
     profile: AgentProfile;
     version: AgentProfileVersion;
@@ -144,6 +155,7 @@ export interface ControlPlaneStore {
   pinProfile(
     profileId: ProfileId,
     versionId: AgentProfileVersion["id"],
+    evidence?: { taskSetHash: string; evalBatchId: string },
   ): Promise<AgentProfile | null>;
   createSession(input: CreateSessionInput): Promise<SessionCreateResult | null>;
   checkSessionQuota(tenantId: Tenant["id"]): Promise<QuotaCheckResult>;
@@ -194,6 +206,7 @@ export interface ControlPlaneStore {
   rejectEvolutionRun(input: RejectEvolutionInput): Promise<EvolutionRun | null>;
   finalizeEvolutionFromService(input: FinalizeEvolutionInput): Promise<EvolutionRun | null>;
   createApiKey(tenantId: Tenant["id"], name: string): Promise<{ key: string; record: ApiKeyRecord }>;
+  revokeApiKey(tenantId: Tenant["id"], keyId: string): Promise<boolean>;
   listApiKeys(tenantId: Tenant["id"]): Promise<ApiKeyRecord[]>;
   listAllApiKeys(): Promise<ApiKeyRecord[]>;
   addWorkspaceMember(

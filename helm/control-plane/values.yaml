@@ -1,17 +1,45 @@
 replicaCount: 1
-
 image:
   repository: diy-agent/control-plane
   tag: "0.1.0"
+  digest: ""
   pullPolicy: IfNotPresent
-
 service:
   type: ClusterIP
   port: 9878
-
+# Provision this Secret independently; secret values never belong in Helm values.
+authSecretName: ""
+terminationGracePeriodSeconds: 180
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+networkPolicy:
+  enabled: true
+  # Default deny. Add your ingress gateway and authorized CP/DP peers explicitly.
+  ingress: []
+  # Add PostgreSQL, approved model/MCP egress and the opposite plane explicitly.
+  egress: []
+  allowDns: true
 env:
-  diyControlPlanePort: "9878"
-  databaseUrl: ""
+  webhookAllowedOrigins: ""
   evolutionUrl: "http://diy-evolution:9880"
-
-resources: {}
+  evolutionIntervalMs: "0"
+  oidcIssuer: ""
+  oidcAudience: ""
+  oidcJwksUrl: ""

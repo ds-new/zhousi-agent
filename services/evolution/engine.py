@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from gepa_loop import run_gepa_loop
 from heuristic import propose_mutations as heuristic_propose
 
 
@@ -42,9 +41,6 @@ def run_evolution(body: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict
         return mutations
 
     if _gepa_enabled() and body.get("evalTasks"):
-        mutations, gepa_meta = run_gepa_loop(body, propose)
-        _, engine = _propose(body, mode)
-        return mutations, engine, gepa_meta
-
+        raise RuntimeError("Use Control Plane GEPA with a real agent evaluator; sidecar simulation is disabled")
     mutations, engine = _propose(body, mode)
     return mutations, engine, {}

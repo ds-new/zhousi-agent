@@ -1,6 +1,6 @@
 import pg from "pg";
 import type { WorkspaceId } from "@diy-agent/domain";
-import { EMBEDDING_DIMENSIONS, cosineSimilarity, embedText } from "./embedding.js";
+import { EMBEDDING_DIMENSIONS, cosineSimilarity, embedText, validateEmbedding, type EmbeddingProvider } from "./embedding.js";
 import type { KbDocument, KbSearchHit } from "./types.js";
 
 function quoteIdent(name: string): string {
@@ -8,20 +8,20 @@ function quoteIdent(name: string): string {
 }
 
 function toVectorLiteral(values: number[]): string {
-  const padded = values.slice(0, EMBEDDING_DIMENSIONS);
-  while (padded.length < EMBEDDING_DIMENSIONS) padded.push(0);
-  return `[${padded.join(",")}]`;
+  return `[${validateEmbedding(values).join(",")}]`;
 }
 
 export class PostgresKbStore {
   constructor(
     private pool: pg.Pool,
     private schema: string,
+    private embeddingProvider?: EmbeddingProvider,
   ) {}
 
   async ingest(doc: Omit<KbDocument, "id" | "createdAt">): Promise<KbDocument> {
     const id = crypto.randomUUID();
-    const embedding = doc.embedding ?? embedText(`${doc.title} ${doc.content}`);
+    const text = `${doc.title} ${doc.content}`;
+    const embedding = validateEmbedding(doc.embedding ?? (this.embeddingProvider ? await this.embeddingProvider(text) : embedText(text)));
     const createdAt = new Date();
     const schema = quoteIdent(this.schema);
     await this.pool.query(
@@ -34,7 +34,7 @@ export class PostgresKbStore {
 
   async search(workspaceId: WorkspaceId, query: string, limit = 5): Promise<KbSearchHit[]> {
     const schema = quoteIdent(this.schema);
-    const queryEmbedding = toVectorLiteral(embedText(query));
+    const queryEmbedding = toVectorLiteral(this.embeddingProvider ? await this.embeddingProvider(query) : embedText(query));
     const result = await this.pool.query<{
       id: string;
       title: string;
@@ -69,7 +69,7 @@ export class PostgresKbStore {
     }>(`SELECT id, title, content, embedding::text AS embedding FROM ${schema}.kb_documents WHERE workspace_id = $1`, [
       workspaceId,
     ]);
-    const queryEmbedding = embedText(query);
+    const queryEmbedding = validateEmbedding(this.embeddingProvider ? await this.embeddingProvider(query) : embedText(query));
     return result.rows
       .map((row) => {
         const parsed = parseVector(row.embedding);

@@ -1,3 +1,4 @@
+import { executeFixtureBenchmark } from "./fixtures/agent-runner.js";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createControlPlaneServer } from "../src/server.js";
@@ -43,14 +44,8 @@ describe("Sprint 3 — enterprise vault sync, dedicated isolation, profile-sync"
           input: `task-${i}`,
           expectedContains: ["ok"],
         });
-        await cp.store.saveTrace({
-          profileId,
-          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
-          output: "ok",
-          latencyMs: 50,
-          toolCalls: [{ name: "tool", ok: true }],
-        });
       }
+      await executeFixtureBenchmark(cp.store, profileId, versionId);
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });
 
       const { status, json } = await request(
@@ -103,14 +98,8 @@ describe("Sprint 3 — enterprise vault sync, dedicated isolation, profile-sync"
           input: `task-${i}`,
           expectedContains: ["ok"],
         });
-        await cp.store.saveTrace({
-          profileId,
-          profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
-          output: "ok",
-          latencyMs: 50,
-          toolCalls: [{ name: "tool", ok: true }],
-        });
       }
+      await executeFixtureBenchmark(cp.store, profileId, versionId);
       await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, { tenantId });
 
       const pinPayload = payloads.find((p) => p.event === "profile.pinned");

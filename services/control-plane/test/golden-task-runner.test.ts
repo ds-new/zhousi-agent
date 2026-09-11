@@ -1,9 +1,9 @@
+import { fixtureAgentRunner } from "./fixtures/agent-runner.js";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ProfileVersionId } from "@diy-agent/domain";
 import { MemoryStore } from "@diy-agent/db";
 import {
-  defaultSnapshotAwareGoldenTaskRunner,
   runGoldenTaskAgentEval,
 } from "../src/golden-task-runner.js";
 
@@ -33,12 +33,12 @@ describe("golden-task-runner", () => {
       profileId: profile.id,
       profileVersionId: roundVersionId,
       snapshot: profile,
-      agentRunner: defaultSnapshotAwareGoldenTaskRunner,
+      agentRunner: fixtureAgentRunner,
     });
 
     assert.equal(result.passRate, 1);
     const traces = await store.listTraces(profile.id);
-    assert.equal(traces.filter((trace) => trace.profileVersionId === roundVersionId).length, 5);
-    assert.match(traces[0]!.output, /pass-token/);
+    assert.equal(traces.filter((trace) => trace.profileVersionId === roundVersionId && trace.taskId !== "__evaluation_started__").length, 5);
+    assert.match(traces.find(t => t.taskId !== "__evaluation_started__")!.output, /pass-token/);
   });
 });

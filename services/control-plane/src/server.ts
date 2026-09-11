@@ -1,3 +1,10 @@
+import { createDataPlaneAgentRunner } from "./agent-client.js";
+import { evaluateMultiAgent } from "./multi-agent-eval.js";
+import { runEvolutionCycle } from "./evolution-cycle.js";
+import { readTenantServices,type TenantServiceRoute } from "./tenant-routing.js";
+import { runGoldenTaskAgentEval } from "./golden-task-runner.js";
+import { readBody } from "./request-body.js";
+import { authorizeRoute } from "./route-authorization.js";
 /**
  * Control Plane HTTP server — testable factory + route handlers.
  */
@@ -43,20 +50,25 @@ export interface ControlPlaneServer {
 }
 
 export interface CreateControlPlaneOptions {
+  allowDevOidc?: boolean;
   store?: ControlPlaneStore;
   port?: number;
   storage?: "memory" | "postgres";
   evolutionInvoker?: typeof invokeEvolutionService;
   agentGoldenTaskRunner?: AgentGoldenTaskRunner;
   webhookFetch?: WebhookFetch;
+  webhookAllowedOrigins?: string[];
   authMode?: AuthMode;
   serviceAccountMode?: ServiceAccountMode;
   serviceAccountToken?: string;
+  serviceAccountTenantTokens?: Record<string,string>;
+  tenantServices?:Record<string,TenantServiceRoute>;
   platformAdminKey?: string;
   jwksOidc?: JwksOidcConfig;
   dataPlaneUrl?: string;
   dataPlaneInternalToken?: string;
   dataPlaneFetch?: DataPlaneFetch;
+  evolutionIntervalMs?: number;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -64,18 +76,12 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-}
-
 async function maybeDispatchQuotaWarning(
   store: ControlPlaneStore,
   tenantId: string,
   quota: QuotaCheckResult,
   fetchImpl: WebhookFetch,
+  allowedOrigins?: string[],
 ): Promise<void> {
   if (!quota.warning) return;
   if (!(await store.consumeQuotaWarningDispatch(tenantId as TenantId))) return;
@@ -85,6 +91,7 @@ async function maybeDispatchQuotaWarning(
     "quota.warning",
     { tokensUsedToday: quota.tokensUsedToday },
     fetchImpl,
+    {allowedOrigins},
   );
 }
 
@@ -94,18 +101,21 @@ export function createControlPlaneServer(
   const store = options.store ?? new MemoryStore();
   const storage = options.storage ?? "memory";
   const evolve = options.evolutionInvoker ?? invokeEvolutionService;
-  const agentRunner = options.agentGoldenTaskRunner;
+  const agentRunner = options.agentGoldenTaskRunner ?? createDataPlaneAgentRunner(store, { routes:options.tenantServices,url: options.dataPlaneUrl ?? process.env.DIY_DATA_PLANE_URL, token: options.dataPlaneInternalToken ?? process.env.DIY_DATA_PLANE_INTERNAL_TOKEN });
   const webhookFetch = options.webhookFetch ?? globalThis.fetch.bind(globalThis);
   const authOptions = {
     mode: options.authMode ?? ("none" as AuthMode),
     jwksOidc: options.jwksOidc,
+    allowDevOidc: options.allowDevOidc,
   };
   const serviceAccountOptions = {
     mode: options.serviceAccountMode ?? ("none" as ServiceAccountMode),
     token: options.serviceAccountToken,
+    tenantTokens: options.serviceAccountTenantTokens,
   };
   const platformAdminKey = options.platformAdminKey;
   const kbProxyOptions = {
+    routes:options.tenantServices,
     dataPlaneUrl: options.dataPlaneUrl,
     dataPlaneInternalToken: options.dataPlaneInternalToken,
     fetchImpl: options.dataPlaneFetch,
@@ -116,7 +126,7 @@ export function createControlPlaneServer(
     event: string,
     payload: Record<string, unknown>,
   ): Promise<void> {
-    await dispatchWebhooks(store, tenantId, event, payload, webhookFetch);
+    await dispatchWebhooks(store, tenantId, event, payload, webhookFetch,{allowedOrigins:options.webhookAllowedOrigins});
   }
 
   async function route(
@@ -128,6 +138,24 @@ export function createControlPlaneServer(
     if (method === "GET" && path === "/health") {
       return json(res, 200, { ok: true, storage, phase: 3 });
     }
+    if (method === "GET" && path === "/ready") {
+      if (closing) return json(res,503,{ok:false});
+      try {await store.health();} catch {return json(res,503,{ok:false});}
+      return json(res,200,{ok:true,storage});
+    }
+
+    if (method === "POST" && path === "/sessions/resolve") {
+      const body = await readBody(req);
+      const context = await store.resolveSession(String(body.sessionId ?? ""), req.headers.authorization?.replace(/^Bearer /, "") ?? "");
+      if (!context) return json(res, 401, { error: "invalid_session_token" });
+      const quota=body.checkQuota===true?await store.checkSessionQuota(context.tenantId):undefined;
+      const version = await store.getProfileVersion(context.session.profileId, context.session.profileVersionId);
+      if (!version) return json(res, 404, { error: "version_not_found" });
+      const boundServers=new Set([...version.snapshot.mcpBindings.map(b=>b.serverName),version.snapshot.kbConfig?.externalMcp?.serverName].filter(Boolean));
+      return json(res, 200, { ...context, quota, snapshot: version.snapshot,
+        skillHashes: Object.fromEntries((await store.listSkills(context.tenantId, context.session.workspaceId)).filter(skill=>version.snapshot.skillIds.includes(skill.id)).map(skill => [skill.id, skill.contentHash])),
+        policy: await store.getWorkspacePolicy(context.session.workspaceId), mcpCatalog: (await store.listMcp(context.tenantId)).filter(c=>boundServers.has(c.serverName)) });
+    }
 
     if (method === "POST" && path === "/tenants") {
       const body = await readBody(req);
@@ -137,7 +165,8 @@ export function createControlPlaneServer(
         isolationMode: body.isolationMode as import("@diy-agent/domain").IsolationMode | undefined,
         gateway: body.gateway as import("@diy-agent/domain").TenantGateway | undefined,
       });
-      return json(res, 201, tenant);
+      const { dedicatedDatabaseUrl: _privateUrl, ...publicTenant } = tenant;
+      return json(res, 201, publicTenant);
     }
 
     const gatewayMatch = path.match(/^\/tenants\/([^/]+)\/gateway$/);
@@ -240,6 +269,11 @@ export function createControlPlaneServer(
         profile.pinnedVersionId ??
         (await store.getLatestProfileVersion(profileId))?.id;
       if (!versionId) return json(res, 404, { error: "version_not_found" });
+      if (body.execute === true) {
+        const version = await store.getProfileVersion(profileId, versionId);
+        if (!version) return json(res, 404, { error: "version_not_found" });
+        await runGoldenTaskAgentEval(store, { profileId, profileVersionId: versionId, snapshot: version.snapshot, agentRunner });
+      }
       const evaluation = await runProfileEvaluation(store, profileId, versionId);
       if (!evaluation) return json(res, 404, { error: "profile_not_found" });
 
@@ -310,6 +344,16 @@ export function createControlPlaneServer(
       return json(res, 200, { runs });
     }
 
+    const multiEval = path.match(/^\/profiles\/([^/]+)\/multi-agent\/eval$/);
+    if (method === "POST" && multiEval) {
+      try { return json(res, 200, await evaluateMultiAgent(store, multiEval[1] as ProfileId, agentRunner)); }
+      catch (error) {
+        if (error instanceof Error && error.message === "worker_workspace_mismatch") return json(res, 403, { error: error.message });
+        if (error instanceof Error && error.message === "requires_5_to_100_golden_tasks") return json(res, 400, { error: error.message });
+        throw error;
+      }
+    }
+
     const pinMatch = path.match(/^\/profiles\/([^/]+)\/pin$/);
     if (method === "POST" && pinMatch) {
       const body = await readBody(req);
@@ -331,6 +375,7 @@ export function createControlPlaneServer(
         fireWebhooks,
       });
       if (!pinResult.ok) {
+        if (pinResult.error === "version_approval_required") return json(res, 403, { error: pinResult.error });
         if (pinResult.error === "insufficient_golden_tasks") {
           return json(res, 400, { error: pinResult.goldenCheck?.reason });
         }
@@ -373,6 +418,7 @@ export function createControlPlaneServer(
         body.tenantId as string,
         quota,
         webhookFetch,
+        options.webhookAllowedOrigins,
       );
       return json(res, 201, { ...result, quotaWarning: quota.warning ?? false });
     }
@@ -380,11 +426,13 @@ export function createControlPlaneServer(
     if (method === "POST" && path === "/golden-tasks") {
       const body = await readBody(req);
       if (!body.profileId || !body.input) return json(res, 400, { error: "missing_fields" });
+      if (body.split !== undefined && body.split !== "train" && body.split !== "holdout") return json(res, 400, { error: "invalid_task_split" });
       const task = await store.createGoldenTask({
         profileId: body.profileId as ProfileId,
         input: body.input as string,
         expectedContains: body.expectedContains as string[] | undefined,
         maxLatencyMs: body.maxLatencyMs as number | undefined,
+        split: body.split as "train" | "holdout" | undefined,
       });
       return json(res, 201, task);
     }
@@ -404,12 +452,28 @@ export function createControlPlaneServer(
       return json(res, 200, { traces });
     }
 
+    if (method === "POST" && path === "/usage/events") {
+      const body = await readBody(req);
+      if (typeof body.eventId !== "string" || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(body.eventId) || !Number.isSafeInteger(body.tokensUsed) || Number(body.tokensUsed) < 0) return json(res,400,{error:"invalid_usage_event"});
+      const owner = await store.getTenantForProfile(body.profileId as ProfileId);
+      const version = await store.getProfileVersion(body.profileId as ProfileId,body.profileVersionId as never);
+      if (!owner || !version) return json(res,404,{error:"profile_version_not_found"});
+      if (body.tenantId !== owner.id) return json(res,403,{error:"tenant_mismatch"});
+      const result = await store.recordUsageOnce(owner.id,body.eventId,Number(body.tokensUsed));
+      await maybeDispatchQuotaWarning(store,owner.id,result.quota,webhookFetch,options.webhookAllowedOrigins);
+      return json(res,result.duplicate ? 200 : 201,result);
+    }
+
     if (method === "POST" && path === "/traces") {
       if (!requireServiceAccount(req, res, serviceAccountOptions)) return;
       const body = await readBody(req);
       if (!body.profileId || !body.profileVersionId || body.latencyMs === undefined) {
         return json(res, 400, { error: "missing_fields" });
       }
+      if (!Number.isFinite(body.latencyMs) || Number(body.latencyMs) < 0 || (body.tokensUsed !== undefined && (!Number.isSafeInteger(body.tokensUsed) || Number(body.tokensUsed) < 0))) return json(res,400,{error:"invalid_trace_metrics"});
+      const owner = await store.getTenantForProfile(body.profileId as ProfileId);
+      if (!owner || !await store.getProfileVersion(body.profileId as ProfileId,body.profileVersionId as never)) return json(res,404,{error:"profile_version_not_found"});
+      if (body.tenantId && body.tenantId !== owner.id) return json(res,403,{error:"tenant_mismatch"});
       const trace = await store.saveTrace({
         profileId: body.profileId as ProfileId,
         profileVersionId: body.profileVersionId as import("@diy-agent/domain").ProfileVersionId,
@@ -433,6 +497,7 @@ export function createControlPlaneServer(
           body.tenantId as string,
           quota,
           webhookFetch,
+          options.webhookAllowedOrigins,
         );
       }
       return json(res, 201, trace);
@@ -575,6 +640,7 @@ export function createControlPlaneServer(
         transport: body.transport as import("@diy-agent/domain").McpBinding["transport"],
         command: body.command as string | undefined,
         args: body.args as string[] | undefined,
+        envRef: body.envRef as Record<string, string> | undefined,
         url: body.url as string | undefined,
         defaultSensitivity:
           (body.defaultSensitivity as import("@diy-agent/domain").McpBinding["sensitivity"]) ??
@@ -637,6 +703,31 @@ export function createControlPlaneServer(
       return json(res, 201, hook);
     }
 
+    const toolApproval=path.match(/^\/tool-approvals\/([^/]+)$/);
+    if(method==="POST"&&(toolApproval||path==="/sessions/recover")){
+      const body=await readBody(req);
+      const profile=await store.getProfile(body.profileId as ProfileId);
+      const tenant=profile?await store.getTenantForProfile(profile.id):null;
+      if(!profile||!tenant)return json(res,404,{error:"profile_not_found"});
+      const auth=await requireAuth(req,res,store,authOptions,tenant.id);
+      if(!auth)return;
+      const route=options.tenantServices?.[tenant.id];
+      const url=route?.dataPlaneUrl??(!options.tenantServices?options.dataPlaneUrl:undefined);
+      const token=route?.dataPlaneToken??(!options.tenantServices?options.dataPlaneInternalToken:undefined);
+      if(!url||!token)return json(res,503,{error:"data_plane_route_not_configured"});
+      if(typeof body.sessionId!=="string"||typeof (toolApproval?body.requestId:body.expectedRequestId)!=="string")return json(res,400,{error:"missing_fields"});
+      if(toolApproval&&body.decision!=="allow"&&body.decision!=="deny")return json(res,400,{error:"invalid_approval_decision"});
+      const response=await fetch(url.replace(/\/$/,"")+(toolApproval?"/tool-approvals":"/sessions/recover"),{method:"POST",redirect:"error",signal:AbortSignal.timeout(10000),headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({tenantId:tenant.id,workspaceId:profile.workspaceId,sessionId:body.sessionId,requestId:body.requestId,expectedRequestId:body.expectedRequestId,approvalId:toolApproval?.[1],decision:body.decision,reviewer:auth.subject})});
+      const result=await response.json();
+      if(response.ok)await store.appendAudit({tenantId:tenant.id,workspaceId:profile.workspaceId,actor:auth.subject,action:toolApproval?"tool.approval_decided":"session.execution_recovered",metadata:{approvalId:toolApproval?.[1],sessionId:body.sessionId,requestId:body.requestId??body.expectedRequestId,decision:body.decision}});
+      return json(res,response.status,result);
+    }
+    const revokeKey=path.match(/^\/api-keys\/([^/]+)$/);
+    if(method==="DELETE"&&revokeKey){
+      const body=await readBody(req);
+      const removed=await store.revokeApiKey(body.tenantId as TenantId,revokeKey[1]!);
+      return json(res,removed?200:404,{revoked:removed});
+    }
     if (method === "POST" && path === "/api-keys") {
       const body = await readBody(req);
       if (!body.tenantId || !body.name) {
@@ -859,7 +950,7 @@ export function createControlPlaneServer(
       const run = await store.approveEvolutionRun({
         runId: evoApproveMatch[1]!,
         tenantId: body.tenantId as TenantId,
-        reviewer: (body.reviewer as string) ?? auth.subject,
+        reviewer: auth.subject,
         candidateVersionId: body.candidateVersionId as
           | import("@diy-agent/domain").ProfileVersionId
           | undefined,
@@ -872,7 +963,7 @@ export function createControlPlaneServer(
         fireWebhooks,
         agentRunner,
       });
-      const reviewer = (body.reviewer as string) ?? auth.subject;
+      const reviewer = auth.subject;
       await emitEvolutionApproved(store, {
         tenantId: body.tenantId as TenantId,
         run,
@@ -902,7 +993,7 @@ export function createControlPlaneServer(
       const run = await store.rejectEvolutionRun({
         runId: evoRejectMatch[1]!,
         tenantId: body.tenantId as TenantId,
-        reviewer: (body.reviewer as string) ?? auth!.subject,
+        reviewer: auth!.subject,
         reason: body.reason as string | undefined,
       });
       if (!run) return json(res, 404, { error: "run_not_awaiting_review" });
@@ -989,7 +1080,20 @@ export function createControlPlaneServer(
         (body.orchestration as import("@diy-agent/domain").OrchestrationConfig) ??
         profile.orchestration ??
         { topology: "supervisor" };
-      const orchestrator = createOrchestrator(config.topology);
+      if (!["supervisor", "pipeline", "blackboard"].includes(config.topology) || (config.workerProfileIds && (!Array.isArray(config.workerProfileIds) || config.workerProfileIds.length > 32))) return json(res, 400, { error: "invalid_orchestration_config" });
+      const workerIds = config.workerProfileIds?.length ? config.workerProfileIds : [profile.id];
+      const snapshots = new Map<string, AgentProfile>();
+      for (const id of workerIds) {
+        const worker = await store.getProfile(id);
+        if (!worker || worker.workspaceId !== profile.workspaceId) return json(res, 403, { error: "worker_workspace_mismatch" });
+        const version = worker.pinnedVersionId ? await store.getProfileVersion(id, worker.pinnedVersionId) : await store.getLatestProfileVersion(id);
+        if (!version) return json(res, 404, { error: "worker_version_not_found" });
+        snapshots.set(id, version.snapshot);
+      }
+      const orchestrator = createOrchestrator(config.topology, async (task, context) => {
+        const result = await agentRunner({ id: crypto.randomUUID(), profileId: task.workerProfileId as ProfileId, input: task.instruction + (context ? `\n\nPrevious worker output:\n${context}` : "") }, snapshots.get(task.workerProfileId)!);
+        return result.output;
+      });
       const plan = orchestrator.plan(body.goal as string, config, profile.id);
       const result = await orchestrator.execute(plan);
       return json(res, 200, result);
@@ -1000,10 +1104,29 @@ export function createControlPlaneServer(
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    void route(req, res, req.method ?? "GET", url.pathname);
+    void (async () => {
+      if (await authorizeRoute(req, res, store, authOptions, serviceAccountOptions, platformAdminKey)) {
+        await route(req, res, req.method ?? "GET", url.pathname);
+      }
+    })().catch((error: unknown) => {
+      if (res.headersSent) return res.end();
+      const status = error instanceof Error && error.message === "agent_runner_not_configured" ? 503 : error instanceof SyntaxError ? 400 : error instanceof Error && error.message === "request_too_large" ? 413 : error instanceof Error && error.message === "usage_event_conflict" ? 409 : 500;
+      json(res, status, { error: status === 400 ? "invalid_json" : status === 413 ? "request_too_large" : "internal_error" });
+    });
   });
 
-  server.listen(options.port ?? 0, "127.0.0.1");
+  let closing=false;
+  server.requestTimeout=150000;server.headersTimeout=10000;server.keepAliveTimeout=5000;
+  server.listen(options.port ?? 0, process.env.DIY_BIND_HOST ?? "127.0.0.1");
+  let cycle: Promise<unknown> | undefined;
+  const interval = options.evolutionIntervalMs;
+  const timer = interval && interval >= 1000 ? setInterval(() => {
+    if (cycle) return;
+    cycle = runEvolutionCycle(store, agentRunner, evolve, fireWebhooks)
+      .catch(() => console.error("evolution_cycle_failed"))
+      .finally(() => { cycle = undefined; });
+  }, interval) : undefined;
+  timer?.unref();
 
   return {
     server,
@@ -1015,22 +1138,40 @@ export function createControlPlaneServer(
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
+        if (timer) clearInterval(timer);
+        closing=true;
         server.close((err) => {
-          void store.close?.();
-          if (err) reject(err);
-          else resolve();
+          void Promise.resolve(cycle).then(() => store.close?.()).then(() => err ? reject(err) : resolve(), reject);
         });
       }),
   };
 }
 
 export async function startControlPlaneFromEnv(): Promise<ControlPlaneServer> {
+  const dev = process.env.DIY_ALLOW_INSECURE_DEV === "true";
+  const services=readTenantServices(process.env.DIY_TENANT_SERVICES);
+  const oidc=[process.env.DIY_OIDC_ISSUER,process.env.DIY_OIDC_AUDIENCE,process.env.DIY_OIDC_JWKS_URL];
+  if(oidc.some(Boolean)&&!oidc.every(Boolean))throw new Error("oidc_configuration_incomplete");
+  if (!dev && (!process.env.DATABASE_URL || !process.env.DIY_PLATFORM_ADMIN_KEY?.startsWith("diy_pa_") || (process.env.DIY_PLATFORM_ADMIN_KEY?.length ?? 0)<32 || !process.env.DIY_TENANT_SERVICES || (process.env.DIY_EVOLUTION_INTERNAL_TOKEN?.length ?? 0)<32)) {
+    throw new Error("control_plane_auth_not_configured");
+  }
   const store = await createStore(process.env.DATABASE_URL);
   const port = Number(process.env.DIY_CONTROL_PLANE_PORT ?? 9878);
   const cp = createControlPlaneServer({
     store,
     port,
     storage: process.env.DATABASE_URL ? "postgres" : "memory",
+    authMode: dev ? "none" : "api_key",
+    webhookAllowedOrigins:dev?undefined:(process.env.DIY_WEBHOOK_ALLOWED_ORIGINS??" ").split(",").map(s=>s.trim()).filter(Boolean),
+    platformAdminKey: process.env.DIY_PLATFORM_ADMIN_KEY,
+    serviceAccountMode: dev ? "none" : "token",
+    serviceAccountToken: dev?process.env.DIY_SERVICE_ACCOUNT_TOKEN:undefined,
+    serviceAccountTenantTokens:Object.fromEntries(Object.entries(services).map(([tenant,route])=>[tenant,route.controlPlaneToken])),
+    tenantServices:dev&&!process.env.DIY_TENANT_SERVICES?undefined:services,
+    jwksOidc:oidc.every(Boolean)?{issuer:oidc[0]!,audience:oidc[1]!,jwksUrl:oidc[2]!}:undefined,
+    dataPlaneUrl: process.env.DIY_DATA_PLANE_URL,
+    dataPlaneInternalToken: process.env.DIY_DATA_PLANE_INTERNAL_TOKEN,
+    evolutionIntervalMs: Number(process.env.DIY_EVOLUTION_INTERVAL_MS ?? 0),
   });
   await new Promise<void>((resolve) => {
     cp.server.once("listening", resolve);

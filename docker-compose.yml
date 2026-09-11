@@ -1,53 +1,69 @@
+# LOCAL DEVELOPMENT ONLY. Example credentials and global service identity are deliberately enabled.
+# Production: use docker-compose.production.yml by itself with customer-owned databases and secrets.
+x-node-security: &node-security
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+  stop_grace_period: 180s
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: diy
-      POSTGRES_PASSWORD: diy
+      POSTGRES_PASSWORD: local-development-only
       POSTGRES_DB: diy_agent
-    ports:
-      - "5432:5432"
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["development-database:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U diy -d diy_agent"]
+      test: [CMD-SHELL, "pg_isready -U diy -d diy_agent"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
 
   control-plane:
-    build:
-      context: .
-      dockerfile: Dockerfile.control-plane
+    <<: *node-security
+    build: {context: ., dockerfile: Dockerfile.control-plane}
     environment:
-      DATABASE_URL: postgres://diy:diy@postgres:5432/diy_agent
-      DIY_CONTROL_PLANE_PORT: "9878"
+      DATABASE_URL: postgres://diy:local-development-only@postgres:5432/diy_agent
+      DIY_ALLOW_INSECURE_DEV: "true"
       DIY_EVOLUTION_URL: http://evolution:9880
-    ports:
-      - "9878:9878"
+      DIY_DATA_PLANE_URL: http://data-plane:3080
+      DIY_PLATFORM_ADMIN_KEY: diy_pa_local-admin-token-not-for-production
+      DIY_SERVICE_ACCOUNT_TOKEN: diy_sa_local-cp-service-not-for-production
+      DIY_DATA_PLANE_INTERNAL_TOKEN: local-dp-service-not-for-production
+      DIY_EVOLUTION_INTERNAL_TOKEN: local-evolution-not-for-production
+      DIY_EVOLUTION_INTERVAL_MS: "0"
+    ports: ["127.0.0.1:9878:9878"]
     depends_on:
-      postgres:
-        condition: service_healthy
-      evolution:
-        condition: service_started
+      postgres: {condition: service_healthy}
+      evolution: {condition: service_healthy}
 
   evolution:
-    build:
-      context: .
-      dockerfile: Dockerfile.evolution
+    <<: *node-security
+    build: {context: ., dockerfile: Dockerfile.evolution}
     environment:
-      DIY_EVOLUTION_PORT: "9880"
-    ports:
-      - "9880:9880"
+      DIY_ALLOW_INSECURE_DEV: "true"
+      DIY_EVOLUTION_INTERNAL_TOKEN: local-evolution-not-for-production
 
   data-plane:
-    build:
-      context: .
-      dockerfile: Dockerfile.data-plane
+    <<: *node-security
+    build: {context: ., dockerfile: Dockerfile.data-plane}
     environment:
-      DIY_DATA_PLANE_PORT: "3080"
+      DIY_ALLOW_INSECURE_DEV: "true"
       DIY_CONTROL_PLANE_URL: http://control-plane:9878
-      DIY_ENTERPRISE_MODE: "true"
-    ports:
-      - "3080:3080"
+      DIY_DATA_PLANE_INTERNAL_TOKEN: local-dp-service-not-for-production
+      DIY_SERVICE_ACCOUNT_TOKEN: diy_sa_local-cp-service-not-for-production
+      DIY_RUNTIME_DATABASE_URL: postgres://diy:local-development-only@postgres:5432/diy_agent
+      DIY_MODEL_ALLOWED_ORIGINS: ${DIY_MODEL_ALLOWED_ORIGINS:-}
+      DIY_MCP_ALLOWED_ORIGINS: ${DIY_MCP_ALLOWED_ORIGINS:-}
+      DIY_VAULT_KEY_MATERIAL: ${DIY_VAULT_KEY_MATERIAL:-}
+      DIY_DATA_DIRECTORY: /tmp/diy-data
+    ports: ["127.0.0.1:3080:3080"]
     depends_on:
-      control-plane:
-        condition: service_started
+      control-plane: {condition: service_healthy}
+
+volumes:
+  development-database:

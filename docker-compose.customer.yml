@@ -1,0 +1,41 @@
+# Standalone production configuration; do not merge with docker-compose.yml.
+# Customer trust domain only. The runtime database and vault never belong to the Control Plane.
+x-security: &security
+  read_only: true
+  user: "1000:1000"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+  restart: unless-stopped
+  pids_limit: 128
+  mem_limit: 512m
+  cpus: 1.0
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+  stop_grace_period: 180s
+
+services:
+  data-plane:
+    <<: *security
+    image: ${DIY_DATA_PLANE_IMAGE:?Set immutable DIY_DATA_PLANE_IMAGE}
+    environment:
+      DIY_ALLOW_INSECURE_DEV: "false"
+      DIY_TENANT_ID: ${DIY_TENANT_ID:?Set exact customer tenant ID}
+      DIY_RUNTIME_DATABASE_URL: ${DIY_RUNTIME_DATABASE_URL:?Set customer-owned runtime PostgreSQL URL}
+      DIY_DATA_PLANE_INTERNAL_TOKEN: ${DIY_DATA_PLANE_INTERNAL_TOKEN:?Set unique tenant DP token at least 32 characters}
+      DIY_SERVICE_ACCOUNT_TOKEN: ${DIY_SERVICE_ACCOUNT_TOKEN:?Set unique tenant CP callback token at least 32 characters}
+      DIY_CONTROL_PLANE_URL: ${DIY_CONTROL_PLANE_URL:?Set control-plane URL accessible from customer network}
+      DIY_MODEL_ALLOWED_ORIGINS: ${DIY_MODEL_ALLOWED_ORIGINS:-}
+      DIY_MCP_ALLOWED_ORIGINS: ${DIY_MCP_ALLOWED_ORIGINS:-}
+      DIY_ALLOW_STDIO_MCP: "false"
+      DIY_VAULT_KEY_MATERIAL: ${DIY_VAULT_KEY_MATERIAL:-}
+      DIY_DATABASE_URL: ${DIY_DATABASE_URL:-}
+      DIY_TENANT_DB_SCHEMA: ${DIY_TENANT_DB_SCHEMA:-public}
+      DIY_EMBEDDING_BASE_URL: ${DIY_EMBEDDING_BASE_URL:-}
+      DIY_EMBEDDING_MODEL: ${DIY_EMBEDDING_MODEL:-}
+      DIY_EMBEDDING_API_KEY_REF: ${DIY_EMBEDDING_API_KEY_REF:-}
+      DIY_DATA_DIRECTORY: /tmp/diy-data
+    ports: ["127.0.0.1:3080:3080"]
+    networks: [customer]
+
+networks:
+  customer: {}

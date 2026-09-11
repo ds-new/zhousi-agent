@@ -20,6 +20,7 @@ export type PinProfileResult =
       error:
         | "profile_not_found"
         | "version_not_found"
+        | "version_approval_required"
         | "insufficient_golden_tasks"
         | "pin_gate_failed";
       gate?: PinGateResult;
@@ -38,7 +39,10 @@ export async function attemptPinProfileVersion(
   },
 ): Promise<PinProfileResult> {
   const profile = await store.getProfile(input.profileId);
-  if (!profile) return { ok: false, error: "profile_not_found" };
+  if (!profile || (await store.getWorkspace(profile.workspaceId))?.tenantId !== input.tenantId) return { ok: false, error: "profile_not_found" };
+  const version = await store.getProfileVersion(input.profileId, input.versionId);
+  if (!version) return { ok: false, error: "version_not_found" };
+  if (version.approvalStatus !== "approved") return { ok: false, error: "version_approval_required" };
 
   const tasks = await store.listGoldenTasks(input.profileId);
   const goldenCheck = validateGoldenTaskCount(tasks.length);
@@ -46,9 +50,8 @@ export async function attemptPinProfileVersion(
     return { ok: false, error: "insufficient_golden_tasks", goldenCheck };
   }
 
-  const evaluation =
-    input.evaluation ??
-    (await runProfileEvaluation(store, input.profileId, input.versionId));
+  // Re-read durable evidence: caller-supplied gates may be stale or forged.
+  const evaluation = await runProfileEvaluation(store, input.profileId, input.versionId);
   if (!evaluation) return { ok: false, error: "profile_not_found" };
   if (!evaluation.gate.passed) {
     if (!input.skipWebhookOnPinGateFailure) {
@@ -60,7 +63,9 @@ export async function attemptPinProfileVersion(
     return { ok: false, error: "pin_gate_failed", gate: evaluation.gate };
   }
 
-  const pinned = await store.pinProfile(input.profileId, input.versionId);
+  const pinned = await store.pinProfile(input.profileId, input.versionId, {
+    taskSetHash: evaluation.evalRun.taskSetHash!, evalBatchId: evaluation.evalRun.evalBatchId!,
+  });
   if (!pinned) return { ok: false, error: "version_not_found" };
 
   const pinnedVersion = await store.getProfileVersion(input.profileId, input.versionId);

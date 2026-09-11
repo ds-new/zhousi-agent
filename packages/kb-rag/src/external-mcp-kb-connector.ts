@@ -1,3 +1,4 @@
+import { ProtocolMcpKbSearchClient } from "./protocol-mcp-kb-client.js";
 import { acquire, release } from "@diy-agent/dsh-mcp-pool-plugin";
 import type { McpBinding } from "@diy-agent/domain";
 import type { KbSearchHit } from "./types.js";
@@ -9,6 +10,7 @@ export interface McpKbSearchContext {
 }
 
 export interface McpKbSearchClient {
+  close?(): Promise<void>;
   search(
     binding: McpBinding,
     query: string,
@@ -60,11 +62,15 @@ export class HttpMcpKbSearchClient implements McpKbSearchClient {
 }
 
 export class ExternalMcpKbConnector {
+  private client: McpKbSearchClient;
+  private ownsClient: boolean;
   constructor(
     private binding: McpBinding,
-    private client: McpKbSearchClient = new HttpMcpKbSearchClient(),
+    client?: McpKbSearchClient,
     private ctx: McpKbSearchContext = {},
-  ) {}
+  ) { this.client = client ?? new ProtocolMcpKbSearchClient(); this.ownsClient = !client; }
+
+  async close(): Promise<void> { if (this.ownsClient) await this.client.close?.(); }
 
   async search(query: string): Promise<KbSearchHit[]> {
     return this.client.search(this.binding, query, this.ctx);

@@ -3,6 +3,7 @@
  */
 import type { AgentProfile, TenantId } from "@diy-agent/domain";
 import type { KnowledgeBaseConfig } from "@diy-agent/domain";
+import type {TenantServiceRoute} from "./tenant-routing.js";
 
 export type DataPlaneFetch = (
   input: string,
@@ -10,6 +11,7 @@ export type DataPlaneFetch = (
 ) => Promise<Response>;
 
 export interface KbProxyOptions {
+  routes?:Record<string,TenantServiceRoute>;
   dataPlaneUrl?: string;
   dataPlaneInternalToken?: string;
   fetchImpl?: DataPlaneFetch;
@@ -33,8 +35,14 @@ async function forwardJson(
   body: unknown,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  if(options.routes){
+    const route=options.routes[String((body as {tenantId?:string}).tenantId)];
+    if(!route)throw new Error("data_plane_route_not_configured");
+    options={...options,dataPlaneUrl:route.dataPlaneUrl,dataPlaneInternalToken:route.dataPlaneToken};
+  }
   const res = await fetchImpl(`${resolveDataPlaneUrl(options)}${path}`, {
     method: "POST",
+    signal:AbortSignal.timeout(30000), redirect:"error",
     headers: proxyHeaders(options.dataPlaneInternalToken),
     body: JSON.stringify(body),
   });

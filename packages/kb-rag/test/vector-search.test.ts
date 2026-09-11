@@ -36,3 +36,17 @@ describe("kb-rag vector search", () => {
     assert.equal(hits[0]!.source, "internal");
   });
 });
+
+it("uses asynchronous configured embeddings for ingestion and retrieval and rejects malformed vectors", async () => {
+  const calls: string[] = [];
+  const semanticVector = (text: string) => Array.from({ length: 128 }, (_, i) => i === (text.includes("car") || text.includes("automobile") ? 0 : 1) ? 1 : 0);
+  const store = new InternalKbStore(async text => { calls.push(text); return semanticVector(text); });
+  const workspaceId = crypto.randomUUID() as import("@diy-agent/domain").WorkspaceId;
+  await store.ingest({ workspaceId, title: "Vehicles", content: "automobile manual" });
+  await store.ingest({ workspaceId, title: "Marine", content: "ocean fish" });
+  const result = await store.search(workspaceId, "car");
+  assert.equal(result[0]?.title, "Vehicles");
+  assert.equal(calls.length, 3);
+  const invalid = new InternalKbStore(async () => [Number.NaN]);
+  await assert.rejects(invalid.ingest({ workspaceId, title: "bad", content: "invalid vector" }), /kb_embedding_invalid/);
+});

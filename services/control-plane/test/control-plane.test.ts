@@ -1,3 +1,4 @@
+import { executeFixtureBenchmark } from "./fixtures/agent-runner.js";
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import { createControlPlaneServer } from "../src/server.js";
@@ -58,14 +59,8 @@ describe("control-plane HTTP seam", () => {
         input: `task-${i}`,
         expectedContains: ["ok"],
       });
-      await cp.store.saveTrace({
-        profileId,
-        profileVersionId: versionId as import("@diy-agent/domain").ProfileVersionId,
-        output: "ok",
-        latencyMs: 50,
-        toolCalls: [{ name: "tool", ok: true }],
-      });
     }
+    await executeFixtureBenchmark(cp.store, profileId, versionId);
     const { status: pinStatus } = await request(cp.baseUrl, "POST", `/profiles/${profileId}/pin`, {
       tenantId,
     });
@@ -153,7 +148,7 @@ describe("control-plane HTTP seam", () => {
     }
   });
 
-  it("invokes evolution service on successful run", async () => {
+  it("keeps unmeasured evolution candidates pending review", async () => {
     const mockCp = createControlPlaneServer({
       port: 0,
       evolutionInvoker: async (): Promise<EvolutionRunResponse> => ({
@@ -180,7 +175,8 @@ describe("control-plane HTTP seam", () => {
         profileId,
       });
       assert.equal(status, 201);
-      assert.equal((json.run as Record<string, unknown>).status, "completed");
+      assert.equal((json.run as Record<string, unknown>).status, "awaiting_review");
+      assert.equal((json.run as Record<string, unknown>).evalScoreDelta, 0);
     } finally {
       await mockCp.close();
     }

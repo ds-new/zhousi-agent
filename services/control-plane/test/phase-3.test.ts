@@ -14,6 +14,7 @@ async function request(
     method,
     headers: {
       ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(["/tenants", "/api-keys"].includes(path) ? { Authorization: "Bearer diy_pa_test_platform_key" } : {}),
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -35,6 +36,7 @@ describe("Phase 3 — marketplace, evolution guard, service account", () => {
     jwksOidc: {
       issuer: "https://idp.example.com",
       audience: "diy-agent",
+      allowDevHs256: true,
       hs256Secrets: { dev: jwksSecret },
     },
     evolutionInvoker: async () => ({
@@ -150,7 +152,7 @@ describe("Phase 3 — marketplace, evolution guard, service account", () => {
       name: "team-runbook",
       contentHash: "team-hash",
       source: "private",
-    });
+    }, headers);
 
     const { json: profileResult } = await request(
       cp.baseUrl,

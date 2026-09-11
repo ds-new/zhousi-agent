@@ -10,8 +10,15 @@ export interface WebhookDelivery {
 
 export type WebhookFetch = (
   input: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal; redirect?: RequestRedirect },
 ) => Promise<Response>;
+
+export interface WebhookDispatchOptions {
+  /** Undefined permits development delivery; an empty array denies all outbound origins. */
+  allowedOrigins?: string[];
+  timeoutMs?: number;
+  maxDeliveries?: number;
+}
 
 export async function dispatchWebhooks(
   store: ControlPlaneStore,
@@ -19,7 +26,13 @@ export async function dispatchWebhooks(
   event: string,
   payload: Record<string, unknown>,
   fetchImpl: WebhookFetch = globalThis.fetch.bind(globalThis),
+  options: WebhookDispatchOptions = {},
 ): Promise<WebhookDelivery[]> {
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const requestedLimit = options.maxDeliveries ?? 32;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error("invalid_webhook_timeout");
+  if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 0) throw new Error("invalid_webhook_delivery_limit");
+  const maxDeliveries = Math.min(requestedLimit, 32);
   const hooks = await store.listWebhooks(tenantId as TenantId);
   const matching = hooks.filter((hook) => hook.events.includes(event));
   const body = JSON.stringify({
@@ -29,23 +42,29 @@ export async function dispatchWebhooks(
     sentAt: new Date().toISOString(),
   });
 
-  const deliveries: WebhookDelivery[] = [];
-  await Promise.all(
-    matching.map(async (hook) => {
+  return Promise.all(
+    matching.map(async (hook, index): Promise<WebhookDelivery> => {
+      const failed: WebhookDelivery = { url: hook.url, event, ok: false };
+      if (index >= maxDeliveries) return failed;
       try {
+        const url = new URL(hook.url);
+        if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
+            (options.allowedOrigins !== undefined && !options.allowedOrigins.includes(url.origin))) return failed;
         const res = await fetchImpl(hook.url, {
           method: "POST",
+          signal: AbortSignal.timeout(timeoutMs),
+          redirect: "error",
           headers: {
             "Content-Type": "application/json",
             "X-DIY-Event": event,
           },
           body,
         });
-        deliveries.push({ url: hook.url, event, ok: res.ok, status: res.status });
+        await res.body?.cancel().catch(() => {});
+        return { url: hook.url, event, ok: res.ok, status: res.status };
       } catch {
-        deliveries.push({ url: hook.url, event, ok: false });
+        return failed;
       }
     }),
   );
-  return deliveries;
 }

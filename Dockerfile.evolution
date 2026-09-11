@@ -1,5 +1,9 @@
 FROM python:3.12-alpine
 WORKDIR /app
-COPY services/evolution/server.py ./server.py
+COPY services/evolution/ ./
+RUN addgroup -g 1000 app && adduser -D -u 1000 -G app app
+ENV DIY_BIND_HOST=0.0.0.0 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER app
 EXPOSE 9880
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD python3 -c "import os,socket; socket.create_connection(('127.0.0.1',int(os.getenv('DIY_EVOLUTION_PORT','9880'))),3).close()"
 CMD ["python3", "server.py"]

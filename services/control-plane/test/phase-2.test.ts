@@ -14,6 +14,7 @@ async function request(
     method,
     headers: {
       ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(["/tenants", "/api-keys"].includes(path) ? { Authorization: "Bearer diy_pa_test_platform_key" } : {}),
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -23,7 +24,7 @@ async function request(
 }
 
 describe("Phase 2 — auth, RBAC, evolution approve, access policy", () => {
-  const cp = createControlPlaneServer({ port: 0, authMode: "api_key" });
+  const cp = createControlPlaneServer({ agentGoldenTaskRunner: async () => ({ output: "worker result", latencyMs: 10 }), port: 0, authMode: "api_key", allowDevOidc: true, platformAdminKey: "diy_pa_test_platform_key" });
 
   before(async () => {
     await new Promise<void>((resolve) => cp.server.once("listening", resolve));
@@ -124,12 +125,13 @@ describe("Phase 2 — auth, RBAC, evolution approve, access policy", () => {
       cp.baseUrl,
       "GET",
       `/workspaces/${ws.id}/policy`,
+      undefined, headers,
     );
     assert.equal((policy.rules as unknown[]).length, 1);
 
     const mockCp = createControlPlaneServer({
       port: 0,
-      authMode: "api_key",
+      authMode: "api_key", allowDevOidc: true, platformAdminKey: "diy_pa_test_platform_key",
       evolutionInvoker: async (): Promise<EvolutionRunResponse> => ({
         runId: "evo-1",
         status: "awaiting_review",
@@ -213,7 +215,7 @@ describe("Phase 2 — auth, RBAC, evolution approve, access policy", () => {
       {
         profileId,
         goal: "multi-step research task",
-        orchestration: { topology: "pipeline", workerProfileIds: ["w1", "w2"] },
+        orchestration: { topology: "pipeline", workerProfileIds: [profileId, profileId] },
       },
       headers,
     );

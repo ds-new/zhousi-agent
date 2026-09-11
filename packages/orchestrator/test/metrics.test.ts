@@ -4,7 +4,7 @@ import { createOrchestrator } from "../src/index.js";
 
 describe("orchestrator metrics", () => {
   it("returns handoff metrics without affecting pin gate semantics", async () => {
-    const orchestrator = createOrchestrator("supervisor");
+    const orchestrator = createOrchestrator("supervisor", async task => `Executed: ${task.instruction}`);
     const plan = orchestrator.plan(
       "analyze sales data",
       { topology: "supervisor", workerProfileIds: ["w1", "w2"] as never[] },

@@ -13,7 +13,7 @@ import {
   defaultSnapshotAwareGoldenTaskRunner,
   runGoldenTaskAgentEval,
 } from "./golden-task-runner.js";
-import { runProfileEvaluation } from "./profile-eval.js";
+import { evaluationTasks, runProfileEvaluation, taskSetHash } from "./profile-eval.js";
 
 export type EvolutionInvoker = (req: EvolutionRunRequest) => Promise<EvolutionRunResponse>;
 
@@ -74,9 +74,20 @@ async function executeGepaEvolutionPipeline(
   const version = await store.getProfileVersion(run.profileId, run.baseVersionId);
   if (!version) return null;
 
-  const goldenTasks = await store.listGoldenTasks(run.profileId);
-  const baselineEval = await runProfileEvaluation(store, run.profileId, run.baseVersionId);
-  const baselinePassRate = baselineEval?.gate.passRate ?? 0;
+  const allTasks = await store.listGoldenTasks(run.profileId);
+  const benchmarkFingerprint = taskSetHash(allTasks, version.snapshot);
+  const goldenTasks = evaluationTasks(allTasks, "training");
+  const holdoutTasks = evaluationTasks(allTasks, "holdout");
+  const trainingInputs = new Set(goldenTasks.map(task => task.input.trim().toLowerCase()));
+  if (goldenTasks.length < 5 || holdoutTasks.length < 5 || allTasks.length > 100 ||
+    holdoutTasks.some(task => trainingInputs.has(task.input.trim().toLowerCase()))) {
+    const failed = await store.finalizeEvolutionFromService({ runId: run.id, tenantId, status: "failed" });
+    return failed ? { run: failed, awaitingReview: false } : null;
+  }
+  const baselineEval = await runGoldenTaskAgentEval(store, {
+    profileId: run.profileId, profileVersionId: run.baseVersionId, snapshot: version.snapshot, agentRunner, scope: "training",
+  });
+  const baselinePassRate = baselineEval.passRate;
   const rounds: Array<{ round: number; passRate: number }> = [
     { round: 0, passRate: baselinePassRate },
   ];
@@ -85,7 +96,8 @@ async function executeGepaEvolutionPipeline(
   let bestPassRate = baselinePassRate;
   let bestRound = 0;
   let bestMutations: EvolutionMutation[] = [];
-  let lastSvc: EvolutionRunResponse | null = null;
+  const cumulativeMutations: EvolutionMutation[] = [];
+  let bestSvc: EvolutionRunResponse | null = null;
 
   for (let round = 1; round <= GEPA_MAX_ROUNDS; round++) {
     if (bestPassRate >= GEPA_MIN_PASS_RATE) break;
@@ -99,7 +111,8 @@ async function executeGepaEvolutionPipeline(
         target: run.target,
         snapshot: workingSnapshot,
         evalTasks: goldenTasks,
-        traces: await store.listTraces(run.profileId, 50),
+        // Holdout examples and outputs never enter the optimizer context.
+        traces: (await store.listTraces(run.profileId, 10000)).filter(t => t.evalScope === "training" && goldenTasks.some(task => task.id === t.taskId)).slice(0, 50),
       });
     } catch {
       await store.finalizeEvolutionFromService({
@@ -109,9 +122,10 @@ async function executeGepaEvolutionPipeline(
       });
       throw new Error("evolution_service_unavailable");
     }
-    lastSvc = svc;
     if (!svc.mutations?.length) break;
 
+    if (svc.status === "failed") return finalizeFromService(store, run, tenantId, svc, { rounds, bestRound, baselinePassRate, finalPassRate: bestPassRate });
+    cumulativeMutations.push(...svc.mutations);
     workingSnapshot = applyEvolutionMutations(workingSnapshot, svc.mutations);
     const roundVersionId = `${run.id}-gepa-${round}` as ProfileVersionId;
     const reeval = await runGoldenTaskAgentEval(store, {
@@ -119,27 +133,41 @@ async function executeGepaEvolutionPipeline(
       profileVersionId: roundVersionId,
       snapshot: workingSnapshot,
       agentRunner,
+      scope: "training",
     });
     rounds.push({ round, passRate: reeval.passRate });
 
-    if (reeval.passRate >= bestPassRate) {
+    if (reeval.passRate > bestPassRate) {
       bestPassRate = reeval.passRate;
       bestRound = round;
-      bestMutations = svc.mutations;
+      bestMutations = structuredClone(cumulativeMutations);
+      bestSvc = svc;
     }
     if (reeval.passRate >= GEPA_MIN_PASS_RATE) break;
   }
 
-  if (!lastSvc) {
-    return executeSingleEvolutionPipeline(store, run, tenantId, evolve);
+  if (!bestSvc || bestRound === 0) {
+    const failed = await store.finalizeEvolutionFromService({ runId: run.id, tenantId, status: "failed" });
+    return failed ? { run: failed, awaitingReview: false } : null;
   }
-
-  return finalizeFromService(store, run, tenantId, lastSvc, {
+  // Select using training only, then perform a single independent validation.
+  const holdoutBaseline = await runGoldenTaskAgentEval(store, { profileId: run.profileId,
+    profileVersionId: run.baseVersionId, snapshot: version.snapshot, agentRunner, scope: "holdout" });
+  const selectedSnapshot = applyEvolutionMutations(version.snapshot, bestMutations);
+  const holdoutCandidate = await runGoldenTaskAgentEval(store, { profileId: run.profileId,
+    profileVersionId: `${run.id}-holdout` as ProfileVersionId, snapshot: selectedSnapshot, agentRunner, scope: "holdout" });
+  if (!holdoutCandidate.gate?.passed || holdoutCandidate.passRate <= holdoutBaseline.passRate ||
+    taskSetHash(await store.listGoldenTasks(run.profileId), version.snapshot) !== benchmarkFingerprint) {
+    const failed = await store.finalizeEvolutionFromService({ runId: run.id, tenantId, status: "failed",
+      evalScoreDelta: holdoutCandidate.passRate - holdoutBaseline.passRate });
+    return failed ? { run: failed, awaitingReview: false } : null;
+  }
+  return finalizeFromService(store, run, tenantId, bestSvc, {
     rounds,
     bestRound,
-    baselinePassRate,
-    finalPassRate: bestPassRate,
-    mutations: bestMutations.length > 0 ? bestMutations : lastSvc.mutations,
+    baselinePassRate: holdoutBaseline.passRate,
+    finalPassRate: holdoutCandidate.passRate,
+    mutations: bestMutations,
   });
 }
 
@@ -175,11 +203,11 @@ async function executeSingleEvolutionPipeline(
 
   const baselineEval = await runProfileEvaluation(store, run.profileId, run.baseVersionId);
   const baselinePassRate = baselineEval?.gate.passRate ?? 0;
-  return finalizeFromService(store, run, tenantId, svc, {
+  return finalizeFromService(store, run, tenantId, { ...svc, requiresReview: svc.status !== "failed" }, {
     rounds: [{ round: 0, passRate: baselinePassRate }],
     bestRound: 0,
     baselinePassRate,
-    finalPassRate: svc.gepaFinalPassRate ?? baselinePassRate,
+    finalPassRate: baselinePassRate,
     mutations: svc.mutations,
   });
 }
@@ -191,9 +219,18 @@ export async function executeEvolutionPipeline(
   evolve: EvolutionInvoker,
   agentRunner: AgentGoldenTaskRunner = defaultSnapshotAwareGoldenTaskRunner,
 ): Promise<EvolutionPipelineResult | null> {
-  const goldenTasks = await store.listGoldenTasks(run.profileId);
-  if (goldenTasks.length > 0) {
-    return executeGepaEvolutionPipeline(store, run, tenantId, evolve, agentRunner);
-  }
-  return executeSingleEvolutionPipeline(store, run, tenantId, evolve);
+  return store.withLease(`evolution:${run.profileId}`, async () => {
+    const current = await store.getEvolutionRun(run.id);
+    if (!current || current.candidateVersionId || ["completed", "failed", "rejected"].includes(current.status)) return null;
+    try {
+      const goldenTasks = await store.listGoldenTasks(run.profileId);
+      if (goldenTasks.length > 0) {
+        return await executeGepaEvolutionPipeline(store, run, tenantId, evolve, agentRunner);
+      }
+      return await executeSingleEvolutionPipeline(store, run, tenantId, evolve);
+    } catch (error) {
+      await store.finalizeEvolutionFromService({ runId: run.id, tenantId, status: "failed" });
+      throw error;
+    }
+  });
 }

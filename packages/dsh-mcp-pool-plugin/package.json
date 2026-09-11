@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@diy-agent/domain": "*",
-    "@diy-agent/dsh-bootstrap-plugin": "*"
+    "@diy-agent/dsh-bootstrap-plugin": "*",
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*"

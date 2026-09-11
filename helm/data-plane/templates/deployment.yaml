@@ -4,6 +4,10 @@ metadata:
   name: {{ .Release.Name }}-data-plane
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
   selector:
     matchLabels:
       app: {{ .Release.Name }}-data-plane
@@ -12,37 +16,97 @@ spec:
       labels:
         app: {{ .Release.Name }}-data-plane
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: data-plane
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}{{ if .Values.image.digest }}@{{ .Values.image.digest }}{{ else }}:{{ .Values.image.tag }}{{ end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
           ports:
-            - containerPort: {{ .Values.service.port }}
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            failureThreshold: 30
+            periodSeconds: 2
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
           env:
+            - name: DIY_BIND_HOST
+              value: "0.0.0.0"
+            - name: DIY_ALLOW_INSECURE_DEV
+              value: "false"
             - name: DIY_DATA_PLANE_PORT
-              value: {{ .Values.env.diyDataPlanePort | quote }}
+              value: {{ .Values.service.port | quote }}
+            - name: DIY_DATA_DIRECTORY
+              value: /tmp/diy-data
             - name: DIY_CONTROL_PLANE_URL
-              value: {{ .Values.env.controlPlaneUrl | quote }}
+              value: {{ required "env.controlPlaneUrl is required" .Values.env.controlPlaneUrl | quote }}
             - name: DIY_TENANT_ID
-              value: {{ .Values.env.tenantId | quote }}
-            - name: DIY_ENTERPRISE_MODE
-              value: {{ .Values.env.enterpriseMode | quote }}
-            - name: DIY_KMS_KEY_MATERIAL
-              value: {{ .Values.env.kmsKeyMaterial | quote }}
-            - name: DIY_DATABASE_URL
-              value: {{ .Values.env.databaseUrl | quote }}
+              value: {{ required "env.tenantId is required" .Values.env.tenantId | quote }}
+            - name: DIY_MODEL_ALLOWED_ORIGINS
+              value: {{ .Values.env.modelAllowedOrigins | quote }}
+            - name: DIY_MCP_ALLOWED_ORIGINS
+              value: {{ .Values.env.mcpAllowedOrigins | quote }}
+            - name: DIY_ALLOW_STDIO_MCP
+              value: {{ .Values.env.allowStdioMcp | quote }}
             - name: DIY_TENANT_DB_SCHEMA
               value: {{ .Values.env.tenantDbSchema | quote }}
-            - name: DIY_DATA_PLANE_INTERNAL_TOKEN
-              value: {{ .Values.env.dataPlaneInternalToken | quote }}
+            - name: DIY_EMBEDDING_BASE_URL
+              value: {{ .Values.env.embeddingBaseUrl | quote }}
+            - name: DIY_EMBEDDING_MODEL
+              value: {{ .Values.env.embeddingModel | quote }}
+            - name: DIY_EMBEDDING_API_KEY_REF
+              value: {{ .Values.env.embeddingApiKeyRef | quote }}
+            {{- range $key := list "DIY_RUNTIME_DATABASE_URL" "DIY_DATA_PLANE_INTERNAL_TOKEN" "DIY_SERVICE_ACCOUNT_TOKEN" }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "authSecretName is required" $.Values.authSecretName | quote }}
+                  key: {{ $key }}
+            {{- end }}
+            {{- range $key := list "DIY_VAULT_KEY_MATERIAL" "DIY_DATABASE_URL" }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.authSecretName | quote }}
+                  key: {{ $key }}
+                  optional: true
+            {{- end }}
+
+          volumeMounts:
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: temporary
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ .Release.Name }}-data-plane
 spec:
+  type: {{ .Values.service.type }}
   selector:
     app: {{ .Release.Name }}-data-plane
   ports:
-    - port: {{ .Values.service.port }}
-      targetPort: {{ .Values.service.port }}
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

@@ -17,6 +17,7 @@ export type AuthMode = "none" | "api_key";
 export type ServiceAccountMode = "none" | "token";
 
 export interface AuthOptions {
+  allowDevOidc?: boolean;
   mode: AuthMode;
   oidcVerifier?: OidcVerifier;
   jwksOidc?: JwksOidcConfig;
@@ -25,6 +26,7 @@ export interface AuthOptions {
 export interface ServiceAccountOptions {
   mode: ServiceAccountMode;
   token?: string;
+  tenantTokens?: Record<string, string>;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -32,9 +34,15 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+const oidcVerifiers = new WeakMap<JwksOidcConfig, OidcVerifier>();
+
 function resolveOidcVerifier(options: AuthOptions): OidcVerifier | undefined {
   if (options.oidcVerifier) return options.oidcVerifier;
-  if (options.jwksOidc) return createJwksOidcVerifier(options.jwksOidc);
+  if (options.jwksOidc) {
+    let verifier = oidcVerifiers.get(options.jwksOidc);
+    if (!verifier) { verifier = createJwksOidcVerifier(options.jwksOidc); oidcVerifiers.set(options.jwksOidc, verifier); }
+    return verifier;
+  }
   return undefined;
 }
 
@@ -52,11 +60,14 @@ export async function resolveAuthContext(
     };
   }
 
-  const allKeys = await store.listAllApiKeys();
+  const token=req.headers.authorization?.replace(/^Bearer /, "") ?? "";
+  const tokenTenant=token.match(/^diy_sk_([a-f0-9-]{36})\./)?.[1];
+  const allKeys=tokenTenant?await store.listApiKeys(tokenTenant as TenantId):token.startsWith("diy_sk_")?await store.listAllApiKeys():[];
   return authenticateBearer(
     req.headers.authorization,
     allKeys,
     resolveOidcVerifier(options),
+    options.allowDevOidc,
   );
 }
 
@@ -98,11 +109,12 @@ export function requireServiceAccount(
   options: ServiceAccountOptions,
 ): boolean {
   if (options.mode === "none") return true;
-  if (!options.token) {
+  if (!options.token && !Object.keys(options.tenantTokens ?? {}).length) {
     json(res, 500, { error: "service_account_not_configured" });
     return false;
   }
-  if (!authenticateServiceAccount(req.headers.authorization, options.token)) {
+  if (!(options.token && authenticateServiceAccount(req.headers.authorization, options.token)) &&
+      !Object.values(options.tenantTokens ?? {}).some(token => authenticateServiceAccount(req.headers.authorization, token))) {
     json(res, 401, { error: "unauthorized_service_account" });
     return false;
   }
