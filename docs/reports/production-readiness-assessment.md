@@ -1,10 +1,12 @@
 # 逐项生产能力评估与整改
 
-日期：2026-09-10。范围：当前工作区后端及部署配置，延续上一轮改动；未提交、未发布到生产。架构按共享控制面、客户独立数据面、可部署多副本评估。
+更新：2026-09-12。范围：当前工作区后端及部署配置；本次四项架构优化基于 `26b27bf`，未提交、未发布到生产。架构按共享控制面、客户独立数据面、可部署多副本评估。
 
 ## 结论
 
 上一轮版本未达到生产要求。本轮已补齐多副本状态一致性、租户服务身份、可靠计量投递、人工工具审批、独立保留集进化门禁及部署约束，并以真实 PostgreSQL、HTTP 和 MCP 测试验证关键路径。当前可进入受控预生产验收，不能把本地测试通过等同于所有功能已获生产认证。
+
+2026-09-12 已完成 Memory 冷热分离、Session Bootstrap 聚合、Tenant 操作隔离与 Trace SQL 分离、KB 按需检索及只读并发，具体证据见 [四项优化报告](architecture-performance-implementation.md)。
 
 下表的“合同通过”表示表中明确列出的行为已实现并通过测试；“条件通过”表示仍有业务或运行环境前提；“未通过”表示当前没有足够证据支持对应生产声明。测试使用模型 HTTP fixture，没有访问付费模型或客户真实知识库。
 
@@ -14,15 +16,15 @@
 |---|---|---|---|
 | ToB 多租户身份和授权 | 合同通过 | CP 统一租户/Workspace/实体归属校验；每客户双向独立服务令牌；DP 固定租户；修复嵌套 payload 绕过；builder 管理权限负向测试 | 服务凭据由可信运维配置，尚非 mTLS/workload identity 自动轮转系统 |
 | OIDC 与 API key | 合同通过 | HTTPS JWKS 签名、issuer/audience/时间声明校验与密钥轮换测试；开发 HS256 显式隔离；API key 可撤销且跨实例生效 | 需真实企业 IdP 验收；API key 前缀携带租户便于定向读取，旧格式兼容读取仍会扫描目录，宜轮换 |
-| Session 隔离和恢复 | 合同通过 | tenant/workspace/session 作用域；快照版本固定；PostgreSQL 会话事务锁；同请求幂等；双副本重放不再次调用模型；锁连接丢失取消执行并拒绝提交 | 已完成请求保留 7 天；网络失联后的外部副作用不能撤销，未知结果必须由管理员核查并恢复 |
+| Session 隔离和恢复 | 合同通过 | tenant/workspace/session 作用域；快照版本固定；单 store 操作解析执行资料；PostgreSQL 会话事务锁；同请求幂等；双副本重放不再次调用模型；锁连接丢失取消执行并拒绝提交 | 已完成请求保留 7 天；网络失联后的外部副作用不能撤销，未知结果必须由管理员核查并恢复 |
 | Memory 隔离 | 合同通过 | tenant/workspace 复合键；事务内原子更新；两个运行时并发处理同 Workspace 的 12 个 Session，无 Memory/用量丢失 | Workspace 内有意共享，不是用户级私密记忆；私密边界需独立 Workspace |
-| Memory 自治理 | 条件通过 | 定时及每轮 TTL 清理、规范化去重、数量/字节上限、归档；冷 Workspace 可在无新消息时治理；过期工件分批清理 | 当前为确定性治理，合并保留原文；没有语义矛盾消解、质量评分或模型生成摘要 |
-| 控制面数据库隔离与原子性 | 条件通过 | schema/dedicated 路由；租户级持久化、跨实例锁；checkpoint 与审计/trace 同事务；迁移互斥；专库初始化失败补偿；回滚、重启及并发测试 | 仍是每租户 JSON checkpoint；冷实体查找/全局操作扫描目录，单实例队列会限制吞吐；schema 共用应用数据库角色，不能替代独立凭据的数据库权限隔离 |
+| Memory 自治理 | 条件通过 | 冷热分离；最新有效记忆进入上下文；TTL、去重、完整 JSON 容量限制；keyset 分批治理且不重写健康记录；旧工件迁移与原子回滚测试 | 当前为确定性治理，合并保留原文；没有语义矛盾消解、质量评分或模型生成摘要 |
+| 控制面数据库隔离与原子性 | 条件通过 | schema/dedicated 路由；每操作独立状态、同租户协调、不同租户最多 8 路；只读免 before 快照；Trace SQL 权威与冲突校验迁移，保留发布门禁；回滚、重启及并发测试 | 其他目录仍是每租户 JSON checkpoint；冷实体查找/全局操作扫描目录，同租户仍串行；schema 共用应用数据库角色，不能替代独立凭据的数据库权限隔离 |
 | 数据面数据库与多副本 | 合同通过 | 客户 PostgreSQL 存 Session/Memory/Skill/Vault 密文/审批/outbox；原子更新、缺行竞争、事务回滚及丢锁故障测试 | LocalFiles/MemoryArtifacts 仅用于开发；生产须绑定客户自己的数据库，尚未进行跨可用区故障切换与备份恢复演练 |
 | 多 Agent 协作 | 条件通过 | 真实 Worker executor，固定快照，同 Workspace 校验，有界 pipeline/supervisor/blackboard 编排 | 当前为有限顺序编排；不是分布式 DAG 队列、动态并发规划或任意规模集群调度器 |
 | MCP 快速连接与隔离 | 合同通过 | 官方 SDK stdio + Streamable HTTP 握手、认证、工具调用、关闭；并发连接合并、热复用；租户作用域与高敏 Session 冷连接；超时/取消/分页/容量/响应字节上限；批准目录决定地址与凭据引用 | 真实客户服务/OAuth 接入另验；连接额度为进程内；生产 stdio 默认关闭，启用须有 OS 隔离；网络策略应阻断 DNS 重绑定后的非授权目的地 |
 | 自定义 Skill | 条件通过 | 客户域内容寻址存储、hash 完整性检查、Profile 固定 skillIds 加载；目录和内容按租户隔离 | 支持 Markdown 指令能力包；不包含任意脚本依赖安装与沙箱执行平台 |
-| 知识库 | 条件通过 | 外部真实 MCP search；内置真实 embedding 注入；生产无配置拒绝 hash 模拟回退；128 维有限非零校验；客户 PG 路由、同名 Workspace 跨租户检索与重启测试 | 向量维度固定 128；换模型须全量重索引；真实检索召回、文档生命周期和业务权限须客户数据验证 |
+| 知识库 | 条件通过 | 原生 tool/auto 语义与策略审批；只读双源并发、超时取消；真实 MCP/embedding；生产拒绝 hash 模拟回退；128 维校验；客户 PG 路由与跨租户检索/重启测试 | 向量维度固定 128；换模型须全量重索引；真实检索召回、文档生命周期和业务权限须客户数据验证 |
 | 自定义 model | 条件通过 | OpenAI-compatible endpoint/model 配置、租户 provider 约束、origin 白名单、客户 Vault 凭据、有限超时/fallback、响应大小限制 | 其他模型协议需 adapter；模型实际能力、供应商限流和流式协议未用真实服务验收 |
 | 轻量运行时 | 条件通过 | 有界 Node 循环：8 轮、每轮 16 工具、16 个并发执行、120 秒总预算；MCP/DB 资源回收、优雅关闭 | 本机微基准不含模型及子进程资源；没有与 Pi 同硬件、同模型、同任务对照，也未建立生产吞吐 SLO |
 | 工具人工审批 | 合同通过 | ask 持久化 checkpoint，按 tenant/workspace/session/request/approval 精确绑定；批准快照、目录及参数不可换；过期/重复消费拒绝；跨副本恢复不重放先前工具；可信管理员身份与时间留痕 | 外部操作处于未知结果时禁止盲目重试；管理员需依据外部证据决定恢复，不能承诺跨系统 exactly-once |
@@ -58,7 +60,7 @@
 
 设计依据：事务内查询必须使用同一连接，见 [node-postgres 事务文档](https://node-postgres.com/features/transactions)；会话与事务 advisory lock 生命周期见 [PostgreSQL 锁文档](https://www.postgresql.org/docs/18/explicit-locking.html)。锁的存在不构成外部工具副作用可以回滚的证明。
 
-## 最终验证记录
+## 2026-09-10 历史验证记录
 
 | 验证 | 结果 |
 |---|---|
@@ -73,3 +75,16 @@
 | Docker 镜像实构建、远程 CI、集群安装、真实模型收益 | 未通过验收：镜像源访问超时；其余未执行，无相应证据 |
 
 共 214 项测试通过（194 TypeScript + 15 PostgreSQL 集成 + 5 Python）；不同层面的重复行为验证不表示 214 项独立产品能力。
+
+## 2026-09-12 四项优化验证记录
+
+| 验证 | 结果 |
+|---|---|
+| `npm test`（含全工作区构建） | 217/217，37 suites，0 失败、0 跳过 |
+| `npm run typecheck` | 全工作区通过 |
+| `npm run test:python` | 5/5；HTTP 测试在允许本机监听的环境通过 |
+| 真实 PostgreSQL：`test:postgres` / `test:postgres:runtime` / `test:postgres:kb` | 22/22、7/7、1/1，0 跳过；含小数延迟迁移与重启、schema/dedicated 丢锁冲突及审计回滚、市场目录首次写入、冷实体查找、发布证据事务锁 |
+| `npm run bench:architecture` | Session 1 次 store 调用；Memory 普通路径 0 冷归档读写；只读 KB 双源并发断言通过 |
+| `git diff --check` | 通过 |
+
+本轮合计 252 项测试（217 TypeScript + 30 PostgreSQL + 5 Python）。未重复执行未改动的依赖审计、Helm 或镜像发布；历史验收记录不视为本轮重跑。仍未连接客户真实模型、生产数据库或目标集群。

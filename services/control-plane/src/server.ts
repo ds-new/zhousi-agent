@@ -146,15 +146,9 @@ export function createControlPlaneServer(
 
     if (method === "POST" && path === "/sessions/resolve") {
       const body = await readBody(req);
-      const context = await store.resolveSession(String(body.sessionId ?? ""), req.headers.authorization?.replace(/^Bearer /, "") ?? "");
-      if (!context) return json(res, 401, { error: "invalid_session_token" });
-      const quota=body.checkQuota===true?await store.checkSessionQuota(context.tenantId):undefined;
-      const version = await store.getProfileVersion(context.session.profileId, context.session.profileVersionId);
-      if (!version) return json(res, 404, { error: "version_not_found" });
-      const boundServers=new Set([...version.snapshot.mcpBindings.map(b=>b.serverName),version.snapshot.kbConfig?.externalMcp?.serverName].filter(Boolean));
-      return json(res, 200, { ...context, quota, snapshot: version.snapshot,
-        skillHashes: Object.fromEntries((await store.listSkills(context.tenantId, context.session.workspaceId)).filter(skill=>version.snapshot.skillIds.includes(skill.id)).map(skill => [skill.id, skill.contentHash])),
-        policy: await store.getWorkspacePolicy(context.session.workspaceId), mcpCatalog: (await store.listMcp(context.tenantId)).filter(c=>boundServers.has(c.serverName)) });
+      const context=await store.resolveSessionBootstrap(String(body.sessionId??""),req.headers.authorization?.replace(/^Bearer /,"")??"",body.checkQuota===true);
+      if(!context)return json(res,401,{error:"invalid_session_token"});
+      return json(res,200,context);
     }
 
     if (method === "POST" && path === "/tenants") {

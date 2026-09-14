@@ -51,3 +51,44 @@ it("does not silently use development hash embeddings in production", async () =
     await assert.rejects(runtime.search({ tenantId: "tenant" as TenantId, workspaceId: "workspace" as WorkspaceId, kbConfig: { internal: { enabled: true } }, query: "semantic search" }), /kb_embedding_provider_required/);
   } finally { await runtime.close(); }
 });
+
+it("passes search budget and cancellation to embeddings without crossing tenant namespaces", async () => {
+  type Pending = { signal?: AbortSignal; timeoutMs?: number; finish: () => void };
+  const waiting = new Map<string, Pending>();
+  let bothEntered!: () => void;
+  const both = new Promise<void>(resolve => { bothEntered = resolve; });
+  const vector = Array.from({ length: 128 }, (_, index) => index === 0 ? 1 : 0);
+  const runtime = createKbRuntime({ embeddingProvider: async (text, tenantId, options) => {
+    if (text === "shared query") await new Promise<void>((resolve, reject) => {
+      const abort = () => reject(options?.signal?.reason);
+      waiting.set(tenantId!, { signal: options?.signal, timeoutMs: options?.timeoutMs, finish: () => { options?.signal?.removeEventListener("abort", abort); resolve(); } });
+      options?.signal?.addEventListener("abort", abort, { once: true });
+      if (waiting.size === 2) bothEntered();
+    });
+    return vector;
+  } });
+  const workspaceId = crypto.randomUUID() as WorkspaceId;
+  const kbConfig = { internal: { enabled: true } };
+  const first = "a" as TenantId, second = "b" as TenantId;
+  const controller = new AbortController();
+  const a = await runtime.ingest({ tenantId: first, workspaceId, kbConfig, title: "a", content: "private a" });
+  const b = await runtime.ingest({ tenantId: second, workspaceId, kbConfig, title: "b", content: "private b" });
+  const searchA = runtime.search({ tenantId: first, workspaceId, kbConfig, query: "shared query", signal: controller.signal, timeoutMs: 5000 });
+  const searchB = runtime.search({ tenantId: second, workspaceId, kbConfig, query: "shared query", timeoutMs: 6000 });
+  const failureA = assert.rejects(searchA, /tenant_a_cancelled/);
+  try {
+    await both;
+    assert.equal(waiting.get(first)?.timeoutMs, 5000);
+    assert.equal(waiting.get(second)?.timeoutMs, 6000);
+    controller.abort(new Error("tenant_a_cancelled"));
+    await failureA;
+    assert.equal(waiting.get(second)?.signal?.aborted, false);
+    waiting.get(second)!.finish();
+    assert.deepEqual((await searchB).hits.map(hit => hit.documentId), [b!.id]);
+    assert.notEqual(a!.id, b!.id);
+  } finally {
+    for (const pending of waiting.values()) pending.finish();
+    await Promise.allSettled([searchA, searchB]);
+    await runtime.close();
+  }
+});

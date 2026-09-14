@@ -1,7 +1,7 @@
 /**
  * Knowledge Base DSH adapter — kb_search tool + shared KbRuntime.
  */
-import { createKbRuntime, type KbRuntime, type KbRuntimeDeps } from "./kb-runtime.js";
+import { createKbRuntime, type KbRuntime, type KbRuntimeDeps, type KbRuntimeSearchInput, type KbRuntimeIngestInput } from "./kb-runtime.js";
 import {
   handleAutoRagTurnStart,
   resetAutoRagForTests,
@@ -11,7 +11,7 @@ import { resolveKbConfigForSession, type KbSessionContext } from "./snapshot-res
 export const name = "@diy-agent/dsh-kb-plugin";
 export const inject = ["tools", "sessions"] as const;
 
-export { createKbRuntime, resetKbRuntimeForTests, type KbRuntime, type KbRuntimeDeps } from "./kb-runtime.js";
+export { createKbRuntime, resetKbRuntimeForTests, type KbRuntime, type KbRuntimeDeps, type KbRuntimeSearchInput, type KbRuntimeIngestInput } from "./kb-runtime.js";
 export {
   formatAutoRagContext,
   getAutoRagContext,

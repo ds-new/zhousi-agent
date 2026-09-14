@@ -1,7 +1,8 @@
 import pg from "pg";
+import { observeCancellation } from "./search-operation.js";
 import type { WorkspaceId } from "@diy-agent/domain";
 import { EMBEDDING_DIMENSIONS, cosineSimilarity, embedText, validateEmbedding, type EmbeddingProvider } from "./embedding.js";
-import type { KbDocument, KbSearchHit } from "./types.js";
+import type { KbDocument, KbSearchHit, KbSearchOptions } from "./types.js";
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
@@ -32,9 +33,11 @@ export class PostgresKbStore {
     return { ...doc, id, embedding, createdAt };
   }
 
-  async search(workspaceId: WorkspaceId, query: string, limit = 5): Promise<KbSearchHit[]> {
+  async search(workspaceId: WorkspaceId, query: string, limit = 5, options: KbSearchOptions = {}): Promise<KbSearchHit[]> {
+    options.signal?.throwIfAborted();
     const schema = quoteIdent(this.schema);
-    const queryEmbedding = toVectorLiteral(this.embeddingProvider ? await this.embeddingProvider(query) : embedText(query));
+    const queryEmbedding = toVectorLiteral(this.embeddingProvider ? await observeCancellation(this.embeddingProvider(query, options), options.signal) : embedText(query));
+    options.signal?.throwIfAborted();
     const result = await this.pool.query<{
       id: string;
       title: string;
@@ -49,6 +52,7 @@ export class PostgresKbStore {
       [workspaceId, queryEmbedding, limit],
     );
 
+    options.signal?.throwIfAborted();
     return result.rows.map((row) => ({
       documentId: row.id,
       title: row.title,
@@ -59,8 +63,10 @@ export class PostgresKbStore {
   }
 
   /** Fallback search without pgvector operators (tests / degraded mode). */
-  async searchInMemoryFallback(workspaceId: WorkspaceId, query: string, limit = 5): Promise<KbSearchHit[]> {
+  async searchInMemoryFallback(workspaceId: WorkspaceId, query: string, limit = 5, options: KbSearchOptions = {}): Promise<KbSearchHit[]> {
+    options.signal?.throwIfAborted();
     const schema = quoteIdent(this.schema);
+    options.signal?.throwIfAborted();
     const result = await this.pool.query<{
       id: string;
       title: string;
@@ -69,7 +75,8 @@ export class PostgresKbStore {
     }>(`SELECT id, title, content, embedding::text AS embedding FROM ${schema}.kb_documents WHERE workspace_id = $1`, [
       workspaceId,
     ]);
-    const queryEmbedding = validateEmbedding(this.embeddingProvider ? await this.embeddingProvider(query) : embedText(query));
+    const queryEmbedding = validateEmbedding(this.embeddingProvider ? await observeCancellation(this.embeddingProvider(query, options), options.signal) : embedText(query));
+    options.signal?.throwIfAborted();
     return result.rows
       .map((row) => {
         const parsed = parseVector(row.embedding);

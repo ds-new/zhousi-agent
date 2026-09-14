@@ -9,9 +9,11 @@ import {
   type McpKbSearchClient,
   type McpKbSearchContext,
 } from "./external-mcp-kb-connector.js";
-import type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
+import { runSearch, observeCancellation } from "./search-operation.js";
+import type { KbDocument, KbSearchHit, KbSearchResult, KbStore, KbSearchOptions } from "./types.js";
 
-export type { KbDocument, KbSearchHit, KbSearchResult, KbStore } from "./types.js";
+export { runSearch } from "./search-operation.js";
+export type { KbDocument, KbSearchHit, KbSearchResult, KbStore, KbSearchOptions } from "./types.js";
 export { embedText, cosineSimilarity, EMBEDDING_DIMENSIONS, validateEmbedding, type EmbeddingProvider } from "./embedding.js";
 export { InternalKbStore, getInternalIndex, resetInternalIndexForTests } from "./internal-kb-store.js";
 export { PostgresKbStore } from "./postgres-kb-store.js";
@@ -69,29 +71,29 @@ export class HybridKbService {
     return this.internal.ingest({ workspaceId, title, content });
   }
 
-  async search(workspaceId: WorkspaceId, query: string): Promise<KbSearchResult> {
-    const weights = this.config.fusionWeights ?? { internal: 0.6, external: 0.4 };
-    const lists: KbSearchHit[][] = [];
-
-    if (this.config.internal?.enabled) {
-      lists.push(await this.internal.search(workspaceId, query));
-    }
-    if (this.config.externalMcp) {
-      const ext = new ExternalMcpKbConnector(
-        this.config.externalMcp,
-        this.externalClient ?? (this.ownedExternalClient ??= new ProtocolMcpKbSearchClient()),
-        { ...this.mcpContext, workspaceId },
-      );
-      lists.push(await ext.search(query));
-    }
-
-    if (lists.length <= 1) {
-      const hits = lists[0] ?? [];
-      hits.sort((a, b) => b.score - a.score);
+  async search(workspaceId: WorkspaceId, query: string, options: KbSearchOptions = {}): Promise<KbSearchResult> {
+    return runSearch(options, async context => {
+      const weights = this.config.fusionWeights ?? { internal: 0.6, external: 0.4 };
+      const internal = () => observeCancellation(this.internal.search(workspaceId, query, undefined, context), context.signal);
+      const external = () => {
+        const connector = new ExternalMcpKbConnector(this.config.externalMcp!,
+          this.externalClient ?? (this.ownedExternalClient ??= new ProtocolMcpKbSearchClient()),
+          { ...this.mcpContext, workspaceId });
+        return observeCancellation(connector.search(query, context), context.signal);
+      };
+      let lists: KbSearchHit[][];
+      if (this.config.internal?.enabled && this.config.externalMcp) {
+        // Only an operator-approved readonly binding can execute independently of the internal read.
+        lists = this.config.externalMcp.sensitivity === "readonly"
+          ? await Promise.all([Promise.resolve().then(internal), Promise.resolve().then(external)])
+          : [await internal(), await external()];
+      } else if (this.config.internal?.enabled) lists = [await internal()];
+      else if (this.config.externalMcp) lists = [await external()];
+      else lists = [];
+      const hits = lists.length > 1
+        ? reciprocalRankFusion(lists, [weights.internal, weights.external])
+        : [...(lists[0] ?? [])].sort((a, b) => b.score - a.score);
       return { query, hits };
-    }
-
-    const hits = reciprocalRankFusion(lists, [weights.internal, weights.external]);
-    return { query, hits };
+    });
   }
 }

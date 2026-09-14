@@ -6,6 +6,10 @@
 
 `createStore()` 和直接构造 `PostgresStore` 都经过相同的持久化协调边界；直接构造后需先 `await store.init()`。CP 按租户隔离持久化与数据库锁，支持多个 CP 实例访问同一存储。启动迁移和 schema 冲突会明确报错，不静默切换到内存。`MemoryStore` 只适用于开发和测试。
 
+每个 CP store 操作使用独立的业务状态；同租户排队，不同租户每实例最多 8 个操作并行。已知归属的请求定向加载租户，只读操作不生成写入前 checkpoint。评估 Trace 以客户 `eval_traces` 表为权威，独立查询和保留，不再复制到租户 JSON checkpoint；其他目录数据仍使用租户 checkpoint。冷实体查找、启动迁移和全局管理仍可能扫描目录。
+
+目录写入在业务事务内比较加载时的原始 JSONB；若其他操作已改变 checkpoint，则报 `catalog_write_conflict` 并回滚本事务，避免平台锁连接断开后旧状态覆盖新状态。发布门禁读取最新证据与 Trace 写入还共用业务数据库的 Profile 事务锁。连接故障发生在提交应答附近时，调用者仍可能收到错误而数据库已提交；冲突保护不等同于所有 CP 接口支持自动重试，需先查询实际状态再决定下一步。
+
 生产 DP 使用 `PostgresArtifacts` 保存 Session、Workspace Memory、归档、Skill、Vault 密文、审批、执行状态和用量 outbox。Session 作用域包含 tenant、workspace、session；同一 Session 的执行使用 PostgreSQL 事务级 advisory lock，其他副本竞争时返回 `session_busy`，不同 Session 可并发。锁连接失效会中止当前运行；进程退出后数据库自动释放锁。会话结果与对应状态更新在事务内提交，外部模型或工具的副作用不属于该数据库事务。
 
 开发模式可使用 `LocalFiles`，通过 `DIY_DATA_DIRECTORY` 指定目录；文件按作用域 hash 命名、原子替换并限制权限。它不提供跨进程事务或分布式锁。生产不再依赖 DP PVC，也不再要求 DP 只能单副本；所有副本必须绑定同一客户、相同模型/目录配置和客户运行时数据库。
@@ -31,6 +35,8 @@
 
 内部 `DP POST /agent/run` 仅接受该客户的受信 CP 服务身份。Session token 由 CP 验证并解析固定 Profile 版本、工具目录和策略，客户端不能覆盖 tenant、快照或目录。Session 历史互相隔离，Workspace Memory 则在同 Workspace 的会话间共享；需要用户间保密时应使用不同 Workspace。
 
+原生路径 `CP POST /sessions/resolve` 在一个 store 操作中校验 token、检查可选额度并返回固定版本、所绑定 Skill hash、当前 Workspace 策略与 MCP 目录。无效 token 不消耗 RPM。该合并仅在当前请求内生效，没有跨 turn 配置缓存；原生路径继续每轮获取当前策略。旧 DSH 插件的 Session bootstrap 缓存合同见 ADR-0002。
+
 ## 幂等、审批与中断恢复
 
 生产客户端为每个逻辑 turn 生成唯一的 `Idempotency-Key`，允许 1–128 个字母、数字、下划线、点、冒号或连字符。网络重试使用原 key、原输入和原会话；新消息使用新 key。已完成请求返回保存的结果，相同 key 携带不同输入或版本会返回 `idempotency_conflict`。接口也兼容 JSON `requestId`，建议统一使用 header。
@@ -47,11 +53,11 @@
 
 ## Workspace Memory 自治理
 
-Memory 使用 tenant + workspace 作用域，与 Session 对话历史分别持久化。每次正常完成 turn 后原子更新 Memory；生产 DP 还每 60 秒启动一次有界维护，每轮最多扫描 20 个 Workspace，使无新对话的过期数据也能被处理。多副本维护通过存储更新锁协调。
+Memory 使用 tenant + workspace 作用域，与 Session 对话历史分别持久化。每次正常完成 turn 后原子更新 Memory；生产 DP 还每 60 秒启动一次有界维护，每轮最多扫描 20 个工件记录，通过 keyset 游标继续后续 Workspace。PostgreSQL 扫描只获取 key 与 scope，随后逐条治理；多副本维护通过存储更新锁协调。
 
-默认活动记忆最多 1,000 项，TTL 为 90 天；归档保留期限为 30 天。活动内容总字节限制为 512 KiB，归档内容为 4 MiB，超过限制会退休旧条目或移除最旧归档。这里是内容字节限额，不是整个数据库大小配额。
+默认活动记忆最多 1,000 项，TTL 为 90 天；归档保留期限为 30 天。活动 head 的完整 JSON 限制为 512 KiB，冷归档 JSON 为 4 MiB，包含条目元数据，超过限制会退休尾部条目或移除归档前部条目。这不是整个数据库大小配额。模型上下文按 updatedAt 选最新 20 条有效记忆，再限制为 16,000 字符；episodic 合并也按最新内容在前，避免截断最新事实。
 
-去重采用同 kind 的完整内容 NFKC 与空白规范化比较；它不把相似但可能矛盾的事实自动合并。超过 50 条 episodic 条目时，将内容合并为 procedure，并保留原条目归档；这是保守的内容合并，不是已经通过业务验证的语义摘要或冲突裁决。归档与活动记忆持久化在同一 Workspace 状态中，过期和容量淘汰意味着归档不是无限期备份。
+去重采用同 kind 的完整内容 NFKC 与空白规范化比较；它不把相似但可能矛盾的事实自动合并。超过 50 条 episodic 条目时，将内容合并为 procedure，并保留原条目归档；这是保守的内容合并，不是已经通过业务验证的语义摘要或冲突裁决。活动 head 为 `workspace-memory` 的 `{format:2,entries}`，冷归档为 `workspace-memory-archive`。普通上下文与没有退休条目的追加不读写冷归档；维护在内容不变时不重写工件。旧内联归档和 legacy 工件在追加或维护时合并迁移；生产 adapter 中 head、archive、Session 和 outbox 在事务内提交，失败全部回滚。过期和容量淘汰意味着归档不是无限期备份。
 
 ## 自定义 model、Skill、MCP 与知识库
 
@@ -72,6 +78,10 @@ MCP 在 CP 目录注册并经本租户管理员批准，Profile 按 `serverName`
 生产 stdio 默认禁用。显式启用前，客户必须建立独立容器或其他操作系统隔离；SDK 不提供恶意 MCP 沙箱。真实评估使用临时状态且只允许 `readonly` 工具与外部 KB，不能通过评估执行普通或高敏工具；`readonly` 是批准目录的受信声明，仍需工具服务端与网络权限保证没有写副作用。
 
 KB 内容和检索在客户 DP。外部 KB 使用真实 MCP `tools/call`，默认工具 `search`，可配置 `searchTool`；参数为 `{query}`，返回 `structuredContent.hits` 或 text JSON `{hits:[{documentId,title,snippet,score}]}`。外部绑定也必须经该租户批准。
+
+`kbConfig.retrievalMode` 默认为 `tool`：向模型提供 `kb_search({query})`，只有模型选择该工具才检索，并使用模型给出的查询。`auto` 在首次模型调用前检索一次并注入上下文。两种模式均执行 `kb_search` 策略：tool 模式支持持久化 ask 审批；auto 遇 ask/deny 直接拒绝，需人工审批的配置应选择 tool 模式。只有外部绑定被批准为 readonly 时，内外两源并发检索；normal/high 仍顺序执行。融合顺序和权重不变，任一源失败不会悄悄返回部分结果。
+
+原生检索共享 turn 取消信号及 30 秒预算，贯穿 embedding、MCP 获取与调用；失败或取消会终止等待并释放资源。已经发送的 PostgreSQL 查询依赖数据库 statement timeout 终止，不承诺客户端信号可以撤回已提交的数据库工作。
 
 内置 KB 支持受信的租户数据库路由；环境启动路径使用客户配置的 `DIY_DATABASE_URL` / `DIY_TENANT_DB_SCHEMA`，应与平台数据库分离。生产启用内置 KB 必须提供真实 embedding provider，通过 `DIY_EMBEDDING_BASE_URL`、`DIY_EMBEDDING_MODEL` 和客户 Vault 的 `DIY_EMBEDDING_API_KEY_REF` 配置。当前表为 `vector(128)`，输出维度/数值不符会失败，不能回退到开发 hash embedding；模型变更需要重新索引。建表与网络要求见 [生产部署指南](production-deployment.md)。
 

@@ -161,8 +161,7 @@ export class MemoryStore implements ControlPlaneStore {
     if (evidence) {
       const tasks = [...this.goldenTasks.values()].filter(t => t.profileId === profileId).sort((a, b) => a.id.localeCompare(b.id));
       const hash = createHash("sha256").update(JSON.stringify({ tasks, snapshot: version.snapshot })).digest("hex");
-      const latest = [...this.traces.values()].filter(t => t.profileId === profileId && t.profileVersionId === versionId && t.evalScope === "profile")
-        .sort((a, b) => (b.evalBatchId ?? "").localeCompare(a.evalBatchId ?? ""))[0];
+      const latest = await this.latestPinTrace(profileId, versionId);
       if (hash !== evidence.taskSetHash || latest?.evalBatchId !== evidence.evalBatchId ||
         Date.now() - latest.createdAt.getTime() > 24 * 3600_000) return null;
     }
@@ -170,6 +169,11 @@ export class MemoryStore implements ControlPlaneStore {
     if (evolution && profile.pinnedVersionId && profile.pinnedVersionId !== evolution.baseVersionId && profile.pinnedVersionId !== versionId) return null;
     profile.pinnedVersionId = versionId;
     return profile;
+  }
+
+  protected async latestPinTrace(profileId: ProfileId, versionId: AgentProfileVersion["id"]): Promise<EvalTraceRecord | undefined> {
+    return [...this.traces.values()].filter(trace => trace.profileId === profileId && trace.profileVersionId === versionId && trace.evalScope === "profile")
+      .sort((a, b) => (b.evalBatchId ?? "").localeCompare(a.evalBatchId ?? ""))[0];
   }
 
   async createTenant(input: CreateTenantInput): Promise<Tenant> {
@@ -382,6 +386,23 @@ export class MemoryStore implements ControlPlaneStore {
 
   async listGoldenTasks(profileId: ProfileId): Promise<EvalTask[]> {
     return [...this.goldenTasks.values()].filter((t) => t.profileId === profileId);
+  }
+
+  async resolveSessionBootstrap(sessionId: string, token: string, checkQuota = false): Promise<import("./types.js").SessionBootstrap | null> {
+    const context = await this.resolveSession(sessionId, token);
+    if (!context) return null;
+    const version = await this.getProfileVersion(context.session.profileId, context.session.profileVersionId);
+    if (!version) return null;
+    const snapshot = version.snapshot;
+    const boundServers = new Set([...snapshot.mcpBindings.map(binding => binding.serverName), snapshot.kbConfig?.externalMcp?.serverName].filter(Boolean));
+    const skills = await this.listSkills(context.tenantId, context.session.workspaceId);
+    const catalog = await this.listMcp(context.tenantId);
+    return structuredClone({ ...context, snapshot,
+      quota: checkQuota ? await this.checkSessionQuota(context.tenantId) : undefined,
+      skillHashes: Object.fromEntries(skills.filter(skill => snapshot.skillIds.includes(skill.id)).map(skill => [skill.id, skill.contentHash])),
+      policy: await this.getWorkspacePolicy(context.session.workspaceId),
+      mcpCatalog: catalog.filter(entry => boundServers.has(entry.serverName)),
+    });
   }
 
   async saveTrace(trace: Omit<EvalTraceRecord, "id" | "createdAt">): Promise<EvalTraceRecord> {

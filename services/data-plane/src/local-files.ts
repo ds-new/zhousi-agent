@@ -5,6 +5,7 @@ import { artifactKey, decodeArtifact, SkillArtifacts, type ArtifactStore } from 
 
 const locks = new Set<string>();
 const writes = new Map<string, Promise<void>>();
+const recordQueues = new Map<string,Promise<void>>();
 /** Single-process development backend. Production uses PostgresArtifacts for cross-replica transactions. */
 export class LocalFiles extends SkillArtifacts implements ArtifactStore {
   constructor(private root: string) { super(); this.root = resolve(root); }
@@ -50,9 +51,19 @@ export class LocalFiles extends SkillArtifacts implements ArtifactStore {
     try { return await operation(this); } finally { locks.delete(key); }
   }
   async update<T>(kind: string, scope: string[], change: (value: T | undefined) => T): Promise<T> {
-    return this.withLock(['update', ...scope, kind], async () => {
+    return this.withRecordLock(kind,scope, async () => {
       const result = change(await this.read<T>(kind, scope)); await this.write(kind, scope, result); return result;
     });
+  }
+  async withRecordLock<T>(kind:string,scope:string[],fn:(store:ArtifactStore)=>Promise<T>):Promise<T>{
+    const key=this.path(kind,scope);const previous=recordQueues.get(key)??Promise.resolve();let release!:()=>void;
+    const pending=new Promise<void>(resolve=>{release=resolve;});recordQueues.set(key,pending);
+    await previous;try{return await fn(this);}finally{release();if(recordQueues.get(key)===pending)recordQueues.delete(key);}
+  }
+  async scan(kind:string,tenantId:string,after='',limit=20){
+    const rows=await this.list<unknown>(kind,tenantId,Number.MAX_SAFE_INTEGER);
+    return rows.map(row=>({key:artifactKey(kind,row.scope),scope:row.scope})).filter(row=>row.key>after)
+      .sort((a,b)=>a.key.localeCompare(b.key)).slice(0,Math.max(1,Math.min(limit,1000)));
   }
   async list<T>(kind: string, tenantId: string, limit = 100) {
     artifactKey(kind, [tenantId]);

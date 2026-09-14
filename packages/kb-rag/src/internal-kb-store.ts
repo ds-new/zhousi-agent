@@ -1,5 +1,5 @@
 import type { WorkspaceId } from "@diy-agent/domain";
-import type { KbDocument, KbSearchHit } from "./types.js";
+import type { KbDocument, KbSearchHit, KbSearchOptions } from "./types.js";
 import { cosineSimilarity, embedText, validateEmbedding, type EmbeddingProvider } from "./embedding.js";
 
 const internalIndex = new Map<string, KbDocument[]>();
@@ -21,11 +21,13 @@ export class InternalKbStore {
     return entry;
   }
 
-  async search(workspaceId: WorkspaceId, query: string, limit = 5): Promise<KbSearchHit[]> {
+  async search(workspaceId: WorkspaceId, query: string, limit = 5, options: KbSearchOptions = {}): Promise<KbSearchHit[]> {
+    options.signal?.throwIfAborted();
     const docs = internalIndex.get(workspaceId) ?? [];
     if (docs.length === 0) return [];
 
-    const queryEmbedding = validateEmbedding(this.embeddingProvider ? await this.embeddingProvider(query) : embedText(query));
+    const queryEmbedding = validateEmbedding(this.embeddingProvider ? await this.embeddingProvider(query, options) : embedText(query));
+    options.signal?.throwIfAborted();
     return docs
       .map((doc) => ({
         documentId: doc.id,

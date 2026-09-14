@@ -7,6 +7,10 @@ export interface ArtifactStore {
   remove(kind: string, scope: string[]): Promise<void>;
   update<T>(kind: string, scope: string[], change: (value: T | undefined) => T): Promise<T>;
   withLock<T>(scope: string[], operation: (store: ArtifactStore) => Promise<T>): Promise<T>;
+  /** Serialize changes to one record; PostgreSQL holds the lock through the caller's transaction. */
+  withRecordLock<T>(kind:string, scope:string[], operation:(store:ArtifactStore)=>Promise<T>):Promise<T>;
+  /** Stable keyset page of live record metadata, without loading artifact payloads in PostgreSQL. */
+  scan(kind:string, tenantId:string, after?:string, limit?:number):Promise<Array<{key:string;scope:string[]}>>;
   list<T>(kind: string, tenantId: string, limit?: number): Promise<Array<{ scope: string[]; value: T }>>;
   putSkill(tenantId: string, content: string): Promise<string>;
   getSkill(tenantId: string, contentHash: string): Promise<string>;
@@ -40,6 +44,7 @@ export abstract class SkillArtifacts {
 export class MemoryArtifacts extends SkillArtifacts implements ArtifactStore {
   private entries = new Map<string, { kind:string; scope:string[]; value:unknown; expiresAt?:Date }>();
   private locks = new Set<string>();
+  private recordQueues = new Map<string,Promise<void>>();
   async read<T>(kind:string, scope:string[]):Promise<T|undefined> {
     const record=this.entries.get(artifactKey(kind,scope));
     return record && (!record.expiresAt || record.expiresAt.getTime()>Date.now()) ? structuredClone(record.value) as T : undefined;
@@ -50,7 +55,16 @@ export class MemoryArtifacts extends SkillArtifacts implements ArtifactStore {
     const key=artifactKey('locks',scope); if(this.locks.has(key))throw new Error('session_busy'); this.locks.add(key);
     try{return await fn(this);}finally{this.locks.delete(key);}
   }
-  async update<T>(kind:string,scope:string[],fn:(v:T|undefined)=>T):Promise<T> {return this.withLock(['update',kind,...scope],async()=>{const value=fn(await this.read<T>(kind,scope));await this.write(kind,scope,value);return value;});}
+  async withRecordLock<T>(kind:string,scope:string[],fn:(store:ArtifactStore)=>Promise<T>):Promise<T>{
+    const key=artifactKey(kind,scope);const previous=this.recordQueues.get(key)??Promise.resolve();
+    let release!:()=>void;const pending=new Promise<void>(resolve=>{release=resolve;});this.recordQueues.set(key,pending);
+    await previous;try{return await fn(this);}finally{release();if(this.recordQueues.get(key)===pending)this.recordQueues.delete(key);}
+  }
+  async update<T>(kind:string,scope:string[],fn:(v:T|undefined)=>T):Promise<T> {return this.withRecordLock(kind,scope,async()=>{const value=fn(await this.read<T>(kind,scope));await this.write(kind,scope,value);return value;});}
+  async scan(kind:string,tenantId:string,after='',limit=20){
+    artifactKey(kind,[tenantId]);return [...this.entries.entries()].filter(([key,r])=>r.kind===kind&&r.scope[0]===tenantId&&key>after&&(!r.expiresAt||r.expiresAt.getTime()>Date.now()))
+      .sort(([a],[b])=>a.localeCompare(b)).slice(0,Math.max(1,Math.min(limit,1000))).map(([key,r])=>({key,scope:[...r.scope]}));
+  }
   async list<T>(kind:string,tenantId:string,limit=100) {return [...this.entries.values()].filter(r=>r.kind===kind&&r.scope[0]===tenantId&&(!r.expiresAt||r.expiresAt.getTime()>Date.now())).slice(0,limit).map(r=>({scope:r.scope,value:structuredClone(r.value) as T}));}
   async health(){} async close(){}
 }

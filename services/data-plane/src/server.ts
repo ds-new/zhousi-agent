@@ -31,20 +31,20 @@ export function createDataPlaneServer(options:DataPlaneServerOptions={}):DataPla
  const modelOrigins=(process.env.DIY_MODEL_ALLOWED_ORIGINS??'').split(',').map(s=>s.trim()).filter(Boolean);
  const mcp={allowStdio:!options.production||process.env.DIY_ALLOW_STDIO_MCP==='true',
   allowedHttpOrigins:options.production?(process.env.DIY_MCP_ALLOWED_ORIGINS??'').split(',').map(s=>s.trim()).filter(Boolean):undefined,resolveCredential};
- const embeddingProvider=process.env.DIY_EMBEDDING_BASE_URL?async(text:string,tenant?:string)=>{
+ const embeddingProvider=process.env.DIY_EMBEDDING_BASE_URL?async(text:string,tenant?:string,searchOptions?:{signal?:AbortSignal})=>{
   if(!tenant)throw new Error('embedding_tenant_required');
   const url=new URL(process.env.DIY_EMBEDDING_BASE_URL!.replace(/\/$/,'')+'/embeddings');
   if(!modelOrigins.includes(url.origin))throw new Error('model_origin_not_allowed');
   const ref=process.env.DIY_EMBEDDING_API_KEY_REF;
   const secret=ref?await resolveCredential(tenant,ref):undefined;
-  const response=await fetch(url,{method:'POST',signal:AbortSignal.timeout(30000),redirect:'error',headers:{'Content-Type':'application/json',...(secret?{Authorization:`Bearer ${secret}`}:{})},body:JSON.stringify({model:process.env.DIY_EMBEDDING_MODEL,input:text,dimensions:128})});
+  const response=await fetch(url,{method:'POST',signal:AbortSignal.any([AbortSignal.timeout(30000),...(searchOptions?.signal?[searchOptions.signal]:[])]),redirect:'error',headers:{'Content-Type':'application/json',...(secret?{Authorization:`Bearer ${secret}`}:{})},body:JSON.stringify({model:process.env.DIY_EMBEDDING_MODEL,input:text,dimensions:128})});
   if(!response.ok)throw new Error('embedding_request_failed');
   const result=await readLimitedJson<{data:Array<{embedding:number[]}>}>(response);return result.data?.[0]?.embedding;
  }:undefined;
  const kbRuntime=options.kbRuntime??createKbRuntime({...options.kbRuntimeDeps,requireTenant:options.production??options.kbRuntimeDeps?.requireTenant,
   ...(embeddingProvider?{embeddingProvider}:{}),mcpConnectionOptions:{...mcp,...options.kbRuntimeDeps?.mcpConnectionOptions}});
  const runtime=options.agentRuntime??new AgentRuntime({files,tenantId,strictPolicy:options.production,mcp,resolveCredential,allowedModelOrigins:modelOrigins,
-  retrieve:async input=>JSON.stringify(await kbRuntime.search({tenantId:input.tenantId as never,workspaceId:input.workspaceId as never,sessionId:input.sessionId,query:input.input,kbConfig:input.snapshot.kbConfig!}))});
+  retrieve:async input=>JSON.stringify(await kbRuntime.search({tenantId:input.tenantId as never,workspaceId:input.workspaceId as never,sessionId:input.sessionId,signal:input.signal,timeoutMs:30000,query:input.input,kbConfig:input.snapshot.kbConfig!}))});
  const dispatcher=tenantId&&options.serviceAccountToken?new UsageDispatcher(files,tenantId,cpUrl,options.serviceAccountToken):undefined;
  dispatcher?.start();
  let maintenance:Promise<unknown>|undefined;

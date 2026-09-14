@@ -86,7 +86,7 @@ it("Postgres leases exclude another replica without blocking callback store acce
   } finally { release?.(); await held; await first.close(); await second.close(); }
 });
 
-it("catalog writes avoid unrelated tenants and roll back trace SQL if checkpoint fails", async () => {
+it("catalog writes avoid unrelated tenants and roll back audit SQL if checkpoint fails", async () => {
   const url = process.env.DIY_TEST_DATABASE_URL!;
   const store = await createStore(url);
   const sql = new pg.Pool({ connectionString: url });
@@ -101,8 +101,10 @@ it("catalog writes avoid unrelated tenants and roll back trace SQL if checkpoint
     await block(unrelated.dbSchema);
     await store.registerSkill({ tenantId: tenant.id, workspaceId: ws.id, name: "isolated write", contentHash: "abc", source: "private" });
     await block(tenant.dbSchema);
-    await assert.rejects(store.saveTrace({ profileId: created.profile.id, profileVersionId: created.version.id, output: "must roll back", latencyMs: 1 }), /injected checkpoint failure/);
-    assert.equal((await store.listTraces(created.profile.id)).length, 0);
+    await assert.rejects(store.registerCredentialRef({ tenantId: tenant.id, scope: "workspace", createdBy: "audit rollback test" }), /injected checkpoint failure/);
+    assert.equal((await store.listAuditLog(tenant.id)).length, 0);
+    await store.saveTrace({ profileId: created.profile.id, profileVersionId: created.version.id, output: "independent SQL record", latencyMs: 1 });
+    assert.equal((await store.listTraces(created.profile.id)).length, 1);
   } finally {
     await sql.query(`DROP TRIGGER IF EXISTS fail_checkpoint ON "${tenant.dbSchema}".catalog_state`);
     await sql.query(`DROP TRIGGER IF EXISTS fail_checkpoint ON "${unrelated.dbSchema}".catalog_state`);

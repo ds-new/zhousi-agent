@@ -3,7 +3,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import type { AuditEvent, ProfileId, Tenant, TenantGateway, TenantId } from "@diy-agent/domain";
-import { isTraceExpired } from "@diy-agent/domain";
 import { MemoryStore } from "./memory-store.js";
 import {
   buildDedicatedConnectionString,
@@ -12,7 +11,8 @@ import {
 } from "./tenant-storage.js";
 import type { EvalTraceRecord } from "./types.js";
 import type { CreateTenantInput } from "./types.js";
-import { decodeState } from "./persistent-state.js";
+import { decodeState, type StoreState } from "./persistent-state.js";
+import { insertTrace, readTraces, readLatestPinTrace } from "./postgres-traces.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -24,30 +24,43 @@ function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-export class PostgresStore extends MemoryStore {
-  private pool: pg.Pool;
-  private platformReady = false;
-  private dedicatedPools = new Map<string, pg.Pool>();
-  private operationQueue: Promise<void> = Promise.resolve();
-  private transactionClients?: Map<pg.Pool, pg.PoolClient>;
-  private readonly leasePool: pg.Pool;
-  private readonly entityOwners = new Map<string, string>();
+interface PostgresResources {
+  pool: pg.Pool;
+  leasePool: pg.Pool;
+  dedicatedPools: Map<string, pg.Pool>;
+  entityOwners: Map<string, string>;
+  profileOwners: Map<string, string>;
+  ready: boolean;
+  initializing?: Promise<void>;
+  closing: boolean;
+  closed?: Promise<void>;
+  pending: Set<Promise<unknown>>;
+  queues: Map<string, Promise<void>>;
+  active: number;
+  slots: Array<() => void>;
+}
 
-  constructor(private connectionString: string) {
-    super();
-    this.pool = new pg.Pool({ connectionString, connectionTimeoutMillis: 10_000, statement_timeout:30000,query_timeout:35000 });
-    this.leasePool = new pg.Pool({ connectionString, max: 4, connectionTimeoutMillis: 10_000 });
-    // All public construction paths must use the same durability boundary.
-    return new Proxy(this, { get(target, property) {
-      const value = Reflect.get(target, property);
-      if (typeof value !== "function") return value;
-      if (typeof property !== "string" || ["init", "close", "getPool", "catalogOperation", "withLease","health"].includes(property)) return value.bind(target);
-      return (...args: unknown[]) => target.catalogOperation(() => value.apply(target, args), !/^(get|list|resolve)/.test(property), property, args);
-    } });
-  }
+/** Fresh business maps and transaction state for exactly one catalog operation. */
+class PostgresCatalog extends MemoryStore {
+  private transactionClients?: Map<pg.Pool, pg.PoolClient>;
+  // Capture the actual stored JSON, including fields the current model does not
+  // materialize. Reconstructing tenantState is not a valid CAS expectation.
+  private restoredCatalogs = new Map<string, unknown>();
+  constructor(private connectionString: string, private resources: PostgresResources) { super(); }
+  private get pool() { return this.resources.pool; }
+  private get leasePool() { return this.resources.leasePool; }
+  private get dedicatedPools() { return this.resources.dedicatedPools; }
+  private get entityOwners() { return this.resources.entityOwners; }
+  private get platformReady() { return this.resources.ready; }
+  private set platformReady(value: boolean) { this.resources.ready = value; }
 
   async init(): Promise<void> {
     if (this.platformReady) return;
+    if (!this.resources.initializing) this.resources.initializing = this.migrate().finally(() => { this.resources.initializing = undefined; });
+    return this.resources.initializing;
+  }
+
+  private async migrate(): Promise<void> {
     const lock = await this.pool.connect();
     let failed: Error | undefined;
     try {
@@ -145,29 +158,39 @@ export class PostgresStore extends MemoryStore {
     }
   }
 
-  private async restoreCatalogs(migrate = false, tenantId?: string): Promise<void> {
-    const tenants = await this.pool.query("SELECT * FROM platform.tenants");
+  private async restoreCatalogs(migrate = false, tenantId?: string, method?: string): Promise<void> {
+    const marketplaceOnly = ["publishMarketplaceSkill", "listMarketplaceSkills", "getMarketplaceSkill"].includes(method ?? "");
+    const metadataOnly = ["createTenant", "listTenants", "getTenant", "updateTenantGateway", "saveTrace", "listTraces", "appendAudit", "listAuditLog"].includes(method ?? "");
+    const tenants = marketplaceOnly ? { rows: [] } : await this.pool.query(tenantId ? "SELECT * FROM platform.tenants WHERE id = $1" : "SELECT * FROM platform.tenants", tenantId ? [tenantId] : undefined);
     this.tenants.clear();
     this.resetPersistentState();
     for (const row of tenants.rows) {
       const tenant: Tenant = { id: row.id, name: row.name, dbSchema: row.db_schema, isolationMode: row.isolation_mode,
         gateway: row.gateway, dedicatedDatabaseUrl: row.dedicated_database_url ?? undefined, createdAt: row.created_at };
       this.tenants.set(tenant.id, tenant);
+      this.entityOwners.set(tenant.id, tenant.id);
       if (tenant.isolationMode === "dedicated" && !this.dedicatedPools.has(tenant.id)) {
         this.dedicatedPools.set(tenant.id, new pg.Pool({ connectionString: tenant.dedicatedDatabaseUrl }));
       }
-      if (tenantId && tenant.id !== tenantId) continue;
+      if (metadataOnly && !migrate && (tenantId || !["saveTrace", "listTraces"].includes(method ?? ""))) continue;
       const { pool, schema } = this.resolvePoolAndSchema(tenant);
       if (migrate) await this.applyTenantSchemaOnPool(pool, schema);
       if (migrate) await pool.query(`CREATE TABLE IF NOT EXISTS ${quoteIdent(schema)}.catalog_state (id TEXT PRIMARY KEY, payload JSONB NOT NULL)`);
+      if (migrate) await this.migrateCheckpointTraces(pool, schema);
       const result = await pool.query(`SELECT payload FROM ${quoteIdent(schema)}.catalog_state WHERE id = 'catalogs'`);
+      if (result.rows[0]) this.restoredCatalogs.set(tenant.id, result.rows[0].payload);
       if (result.rows[0]) {
         const state = decodeState(result.rows[0].payload);
+        delete state.maps.traces;
         this.restoreTenantState(state);
+        for (const [id] of state.maps.profiles ?? []) this.resources.profileOwners.set(id, tenant.id);
         for (const entries of Object.values(state.maps)) for (const [id] of entries) this.entityOwners.set(id, tenant.id);
       }
     }
+    const subscribedSkills = this.marketplaceSubscriptions.size > 0 && ["listSkills", "resolveSessionBootstrap"].includes(method ?? "");
+    if (!migrate && !subscribedSkills && !["publishMarketplaceSkill", "listMarketplaceSkills", "getMarketplaceSkill", "subscribeMarketplaceSkill", "resolveSkillEvolutionTarget", "createEvolutionRun", "triggerEvolutionSignal"].includes(method ?? "")) return;
     const global = await this.pool.query("SELECT payload FROM platform.catalog_state WHERE id = 'marketplace'");
+    if (global.rows[0]) this.restoredCatalogs.set("marketplace", global.rows[0].payload);
     const globalState = decodeState({ maps: { marketplace: global.rows[0]?.payload ?? [] }, warnings: [] });
     this.marketplaceSkills = new Map(globalState.maps.marketplace as Array<[string, import("@diy-agent/domain").MarketplaceSkill]>);
   }
@@ -182,7 +205,7 @@ export class PostgresStore extends MemoryStore {
         if (typeof record[field] === "string") return this.entityOwners.get(record[field]);
       }
     }
-    if (typeof input === "string") return this.tenants.has(input) ? input : this.entityOwners.get(input);
+    if (typeof input === "string") return this.entityOwners.get(input);
     return undefined;
   }
 
@@ -216,22 +239,54 @@ export class PostgresStore extends MemoryStore {
       const payload = JSON.stringify(this.tenantState(tenant.id));
       if (before.get(tenant.id) === payload) continue;
       const { pool, schema } = this.resolvePoolAndSchema(tenant);
-      await this.businessQuery(pool, `INSERT INTO ${quoteIdent(schema)}.catalog_state (id, payload) VALUES ('catalogs', $1::jsonb)
-        ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload`, [payload]);
+      await this.compareAndSaveCatalog(pool, `${quoteIdent(schema)}.catalog_state`, "catalogs", tenant.id, payload);
     }
     const marketplace = JSON.stringify([...this.marketplaceSkills]);
-    if (before.get("marketplace") !== marketplace) await this.businessQuery(this.pool, `INSERT INTO platform.catalog_state (id, payload) VALUES ('marketplace', $1::jsonb)
-      ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload`, [marketplace]);
+    if (before.get("marketplace") !== marketplace) await this.compareAndSaveCatalog(this.pool, "platform.catalog_state", "marketplace", "marketplace", marketplace);
   }
 
-  /** Keeps legacy aggregate semantics serializable; only dirty partitions are written. */
-  async catalogOperation<T>(operation: () => Promise<T>, write: boolean, method?: string, args: unknown[] = []): Promise<T> {
-    const previous = this.operationQueue;
-    let done!: () => void;
-    this.operationQueue = new Promise<void>(resolve => { done = resolve; });
-    await previous;
+  private async compareAndSaveCatalog(pool: pg.Pool, table: string, id: string, key: string, payload: string): Promise<void> {
+    // Advisory locks reduce contention, but their connection may fail while the
+    // independent business transaction is alive. SQL CAS is the final fence;
+    // a stale writer rolls back its entire transaction, including audit records.
+    const result = this.restoredCatalogs.has(key)
+      ? await this.businessQuery(pool, `UPDATE ${table} SET payload = $2::jsonb WHERE id = $1 AND payload = $3::jsonb RETURNING id`,
+        [id, payload, JSON.stringify(this.restoredCatalogs.get(key))])
+      : await this.businessQuery(pool, `INSERT INTO ${table} (id, payload) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO NOTHING RETURNING id`, [id, payload]);
+    if (result.rowCount !== 1) throw new Error("catalog_write_conflict");
+  }
+
+  /** The proxy delegates into an unproxied operation context, so nested store calls share one lock. */
+  async catalogOperation<T>(_operation: () => Promise<T>, write: boolean, method?: string, args: unknown[] = []): Promise<T> {
+    if (!method) throw new Error("catalog_method_required");
+    if (this.resources.closing) throw new Error("store_closed");
+    const task = (async () => {
+      await this.init();
+      const tenantId = this.operationTenant(method, args);
+      const queueKey = tenantId ?? "global";
+      const previous = this.resources.queues.get(queueKey) ?? Promise.resolve();
+      let done!: () => void;
+      const queued = new Promise<void>(resolve => { done = resolve; });
+      this.resources.queues.set(queueKey, queued);
+      await previous;
+      if (this.resources.active >= 8) await new Promise<void>(resolve => this.resources.slots.push(resolve));
+      else this.resources.active++;
+      try {
+        const context = new PostgresCatalog(this.connectionString, this.resources);
+        return await context.executeOperation<T>(write, method, args, tenantId);
+      } finally {
+        const next = this.resources.slots.shift();
+        if (next) next(); else this.resources.active--;
+        done();
+        if (this.resources.queues.get(queueKey) === queued) this.resources.queues.delete(queueKey);
+      }
+    })();
+    this.resources.pending.add(task);
+    try { return await task; } finally { this.resources.pending.delete(task); }
+  }
+
+  private async executeOperation<T>(write: boolean, method: string, args: unknown[], tenantId?: string): Promise<T> {
     let lock: pg.PoolClient | undefined;
-    const tenantId = this.operationTenant(method, args);
     let lockError: Error | undefined;
     const onLockError = (error: Error) => { lockError = error; };
     try {
@@ -243,17 +298,20 @@ export class PostgresStore extends MemoryStore {
         await lock.query("SELECT pg_advisory_lock_shared(7318520)");
         await lock.query("SELECT pg_advisory_lock(hashtextextended($1, 15485863))", [tenantId]);
       } else await lock.query("SELECT pg_advisory_lock(7318520)");
-      await this.restoreCatalogs(false, tenantId);
-      const before = this.snapshotCatalogs(tenantId);
+      await this.restoreCatalogs(false, tenantId, method);
+      const sqlOnly = ["createTenant", "updateTenantGateway", "saveTrace", "appendAudit"].includes(method);
+      const before = write && !sqlOnly ? this.snapshotCatalogs(tenantId) : undefined;
       // Database provisioning cannot run inside a PostgreSQL transaction.
       if (method !== "createTenant") this.transactionClients = new Map();
-      const result = await operation();
-      if (write && method !== "createTenant") await this.saveCatalogs(before, tenantId);
+      const operation = Reflect.get(this, method) as (...input: unknown[]) => Promise<T>;
+      const result = await operation.apply(this, args);
+      if (before) await this.saveCatalogs(before, tenantId);
       if (lockError) throw new Error("catalog_lock_connection_lost", { cause: lockError });
       await lock.query("SELECT 1");
       for (const client of this.transactionClients?.values() ?? []) await client.query("COMMIT");
-      for (const tenant of this.tenants.values()) {
-        if (tenantId && tenant.id !== tenantId) continue;
+      if (write) for (const tenant of this.tenants.values()) {
+        this.entityOwners.set(tenant.id, tenant.id);
+        for (const profile of this.profiles.values()) if (this.workspaces.get(profile.workspaceId)?.tenantId === tenant.id) this.resources.profileOwners.set(profile.id, tenant.id);
         for (const entries of Object.values(this.tenantState(tenant.id).maps)) for (const [id] of entries) this.entityOwners.set(id, tenant.id);
       }
       return structuredClone(result);
@@ -272,7 +330,7 @@ export class PostgresStore extends MemoryStore {
           await lock.query("SELECT pg_advisory_unlock_shared(7318520)");
         } else if (lock) await lock.query("SELECT pg_advisory_unlock(7318520)");
       } catch (error) { lockError = error as Error; throw error; }
-      finally { lock?.off("error", onLockError); lock?.release(lockError); done(); }
+      finally { lock?.off("error", onLockError); lock?.release(lockError); }
     }
   }
 
@@ -312,95 +370,72 @@ export class PostgresStore extends MemoryStore {
     return { pool: this.pool, schema: tenant.dbSchema };
   }
 
+  protected override tenantState(tenantId: string): StoreState {
+    const state = super.tenantState(tenantId);
+    delete state.maps.traces;
+    return state;
+  }
+
+  private traceTenant(profileId: ProfileId): Tenant | undefined {
+    const tenantId = this.resources.profileOwners.get(profileId);
+    return tenantId ? this.tenants.get(tenantId) : undefined;
+  }
+
   override async saveTrace(trace: Omit<EvalTraceRecord, "id" | "createdAt">): Promise<EvalTraceRecord> {
-    const tenant = await this.getTenantForProfile(trace.profileId);
-    if (tenant) {
-      await this.purgeExpiredTracesForTenant(tenant);
-      const entry = await super.saveTrace(trace);
-      const { pool, schema } = this.resolvePoolAndSchema(tenant);
-      const schemaIdent = quoteIdent(schema);
-      await this.businessQuery(pool,
-        `INSERT INTO ${schemaIdent}.eval_traces (id, profile_id, profile_version_id, output, latency_ms, tool_calls, tokens_used, created_at, task_id, eval_batch_id, task_set_hash, execution_source, eval_scope)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13)`,
-        [
-          entry.id,
-          entry.profileId,
-          entry.profileVersionId,
-          entry.output,
-          entry.latencyMs,
-          JSON.stringify(entry.toolCalls ?? []),
-          entry.tokensUsed ?? null,
-          entry.createdAt,
-          entry.taskId ?? null,
-          entry.evalBatchId ?? null,
-          entry.taskSetHash ?? null,
-          entry.executionSource ?? null,
-          entry.evalScope ?? null,
-        ],
-      );
-      return entry;
-    }
-    return super.saveTrace(trace);
+    const tenant = this.traceTenant(trace.profileId);
+    if (!tenant) throw new Error("profile_not_found");
+    const { pool, schema } = this.resolvePoolAndSchema(tenant);
+    const schemaIdent = quoteIdent(schema);
+    const entry: EvalTraceRecord = { ...trace, id: crypto.randomUUID(), createdAt: new Date() };
+    await this.lockProfileEvidence(pool, trace.profileId);
+    await this.businessQuery(pool, `DELETE FROM ${schemaIdent}.eval_traces WHERE profile_id = $1 AND created_at < NOW() - INTERVAL '90 days'`, [trace.profileId]);
+    await insertTrace((sql, params) => this.businessQuery(pool, sql, params), schemaIdent, entry);
+    return entry;
   }
 
   override async listTraces(profileId: ProfileId, limit = 50): Promise<EvalTraceRecord[]> {
-    const tenant = await this.getTenantForProfile(profileId);
-    if (tenant) {
-      const { pool, schema } = this.resolvePoolAndSchema(tenant);
-      const schemaIdent = quoteIdent(schema);
-      const result = await pool.query<{
-        id: string;
-        profile_id: string;
-        profile_version_id: string;
-        output: string;
-        latency_ms: number;
-        tool_calls: EvalTraceRecord["toolCalls"];
-        tokens_used: number | null;
-        task_id: string | null;
-        eval_batch_id: string | null;
-        task_set_hash: string | null;
-        execution_source: EvalTraceRecord["executionSource"] | null;
-        eval_scope: EvalTraceRecord["evalScope"] | null;
-        created_at: Date;
-      }>(
-        `SELECT id, profile_id, profile_version_id, output, latency_ms, tool_calls, tokens_used, created_at, task_id, eval_batch_id, task_set_hash, execution_source, eval_scope
-         FROM ${schemaIdent}.eval_traces
-         WHERE profile_id = $1
-         ORDER BY created_at DESC
-         LIMIT $2`,
-        [profileId, limit],
-      );
-      return result.rows.map((row) => ({
-        id: row.id,
-        profileId: row.profile_id as ProfileId,
-        profileVersionId: row.profile_version_id as import("@diy-agent/domain").ProfileVersionId,
-        output: row.output,
-        latencyMs: row.latency_ms,
-        toolCalls: row.tool_calls,
-        tokensUsed: row.tokens_used ?? undefined,
-        taskId: row.task_id ?? undefined,
-        evalBatchId: row.eval_batch_id ?? undefined,
-        taskSetHash: row.task_set_hash ?? undefined,
-        executionSource: row.execution_source ?? undefined,
-        evalScope: row.eval_scope ?? undefined,
-        createdAt: row.created_at,
-      }));
-    }
-    return super.listTraces(profileId, limit);
+    const tenant = this.traceTenant(profileId);
+    if (!tenant) return [];
+    const { pool, schema } = this.resolvePoolAndSchema(tenant);
+    return readTraces((sql, params) => pool.query(sql, params), quoteIdent(schema), profileId, limit);
   }
 
-  private async purgeExpiredTracesForTenant(tenant: Tenant): Promise<void> {
+  protected override async latestPinTrace(profileId: ProfileId, versionId: EvalTraceRecord["profileVersionId"]): Promise<EvalTraceRecord | undefined> {
+    const tenant = this.traceTenant(profileId);
+    if (!tenant) return undefined;
     const { pool, schema } = this.resolvePoolAndSchema(tenant);
+    await this.lockProfileEvidence(pool, profileId);
+    return readLatestPinTrace((sql, params) => this.businessQuery(pool, sql, params), quoteIdent(schema), profileId, versionId);
+  }
+
+  private async lockProfileEvidence(pool: pg.Pool, profileId: ProfileId): Promise<void> {
+    if (!this.transactionClients) throw new Error("evidence_transaction_required");
+    // Profile UUIDs are globally unique. The lock lives on the physical tenant
+    // database and the very transaction that reads evidence and commits pinning.
+    await this.businessQuery(pool, "SELECT pg_advisory_xact_lock(hashtextextended($1, 32452843))", [profileId]);
+  }
+
+  /** Legacy checkpoint import is atomic and refuses contradictory duplicate trace IDs. */
+  private async migrateCheckpointTraces(pool: pg.Pool, schema: string): Promise<void> {
+    const client = await pool.connect();
     const schemaIdent = quoteIdent(schema);
-    await this.businessQuery(pool,
-      `DELETE FROM ${schemaIdent}.eval_traces WHERE created_at < NOW() - INTERVAL '90 days'`,
-    );
-    const now = new Date();
-    for (const [id, trace] of this.traces) {
-      if (this.workspaces.get(this.profiles.get(trace.profileId)?.workspaceId ?? "")?.tenantId === tenant.id && isTraceExpired(trace.createdAt, now)) {
-        this.traces.delete(id);
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(`SELECT payload FROM ${schemaIdent}.catalog_state WHERE id='catalogs' FOR UPDATE`);
+      const payload = result.rows[0]?.payload;
+      if (payload?.maps && Object.hasOwn(payload.maps, "traces")) {
+        const state = decodeState(payload);
+        const profiles = new Set((state.maps.profiles ?? []).map(([id]) => id));
+        for (const [, raw] of state.maps.traces ?? []) {
+          const trace = raw as EvalTraceRecord;
+          if (!profiles.has(trace.profileId)) throw new Error("legacy_trace_owner_mismatch");
+          await insertTrace((sql, params) => client.query(sql, params), schemaIdent, trace, true);
+        }
+        await client.query(`UPDATE ${schemaIdent}.catalog_state SET payload=payload #- '{maps,traces}' WHERE id='catalogs'`);
       }
-    }
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
   }
 
   override async appendAudit(event: Omit<AuditEvent, "id" | "createdAt">): Promise<AuditEvent> {
@@ -461,19 +496,43 @@ export class PostgresStore extends MemoryStore {
   }
 
   override async close(): Promise<void> {
-    for (const pool of this.dedicatedPools.values()) {
-      await pool.end();
-    }
-    this.dedicatedPools.clear();
-    await this.pool.end();
-    await this.leasePool.end();
+    if (this.resources.closed) return this.resources.closed;
+    this.resources.closing = true;
+    this.resources.closed = (async () => {
+      await Promise.allSettled([...this.resources.pending]);
+      for (const pool of this.dedicatedPools.values()) await pool.end();
+      this.dedicatedPools.clear();
+      await this.pool.end();
+      await this.leasePool.end();
+    })();
+    return this.resources.closed;
+  }
+}
+
+/** Public facade owns shared pools and routes every operation into a fresh catalog context. */
+export class PostgresStore extends PostgresCatalog {
+  constructor(connectionString: string) {
+    super(connectionString, {
+      pool: new pg.Pool({ connectionString, max: 24, connectionTimeoutMillis: 10_000, statement_timeout: 30000, query_timeout: 35000 }),
+      leasePool: new pg.Pool({ connectionString, max: 4, connectionTimeoutMillis: 10_000 }),
+      dedicatedPools: new Map(), entityOwners: new Map(), profileOwners: new Map(), ready: false, closing: false,
+      pending: new Set(), queues: new Map(), active: 0, slots: [],
+    });
+    return new Proxy(this, { get(target, property) {
+      const value = Reflect.get(target, property);
+      if (typeof value !== "function") return value;
+      if (typeof property !== "string" || ["init", "close", "getPool", "catalogOperation", "withLease", "health"].includes(property)) return value.bind(target);
+      return (...args: unknown[]) => target.catalogOperation(() => value.apply(target, args),
+        property === "resolveSessionBootstrap" ? args[2] === true : !/^(get|list|resolve)/.test(property), property, args);
+    } });
   }
 }
 
 export async function createStore(connectionString?: string): Promise<MemoryStore> {
   if (connectionString) {
     const store = new PostgresStore(connectionString);
-    await store.init();
+    try { await store.init(); }
+    catch (error) { await store.close(); throw error; }
     return store;
   }
   return new MemoryStore();

@@ -18,6 +18,7 @@ export type {
   EvalTraceRecord,
   QuotaCheckResult,
   SessionCreateResult,
+  SessionBootstrap,
   TriggerEvolutionSignalInput,
 } from "./types.js";
 export { defaultGateway } from "./types.js";

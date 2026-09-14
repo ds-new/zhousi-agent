@@ -182,13 +182,16 @@ npm run typecheck
 # Python 进化引擎测试
 npm run test:python
 
-# PostgreSQL 集成测试（需独立测试库，会创建临时 schema）
+# PostgreSQL 集成测试（需独立测试库及建库权限，会创建临时数据库/schema）
 DIY_TEST_DATABASE_URL=postgres://user:pass@127.0.0.1:5432/test_db npm run test:postgres
 DIY_TEST_DATABASE_URL=postgres://user:pass@127.0.0.1:5432/test_db npm run test:postgres:runtime
 DIY_TEST_DATABASE_URL=postgres://user:pass@127.0.0.1:5432/test_db npm run test:postgres:kb
 
 # 运行时微基准
 npm run bench:runtime
+
+# 四项架构优化探针（本机 HTTP、Memory 字节量、只读 KB 并发）
+npm run bench:architecture
 ```
 
 ## 生产部署

@@ -80,7 +80,7 @@ export function governMemory(workspaceId: string, policy: MemoryGovernancePolicy
     active.push(entry);
   }
   const stages: GovernanceReport["stages"] = ["ttl", "dedup"];
-  const episodic = active.filter(e => e.kind === "episodic");
+  const episodic = active.filter(e => e.kind === "episodic").sort((a,b)=>b.updatedAt.getTime()-a.updatedAt.getTime());
   const compacted = episodic.length > policy.compactionTriggerCount;
   let final = active;
   if (compacted) {

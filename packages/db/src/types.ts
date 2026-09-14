@@ -130,11 +130,22 @@ export interface QuotaCheckResult {
   warning?: boolean;
 }
 
+export interface SessionBootstrap {
+  session: import("@diy-agent/domain").Session;
+  tenantId: Tenant["id"];
+  snapshot: AgentProfile;
+  quota?: QuotaCheckResult;
+  skillHashes: Record<string, string>;
+  policy: AccessPolicy | null;
+  mcpCatalog: McpCatalogEntry[];
+}
+
 export interface ControlPlaneStore {
   health():Promise<void>;
   withLease<T>(key: string, operation: () => Promise<T>): Promise<T | null>;
   recordUsageOnce(tenantId: Tenant["id"], eventId: string, tokens: number): Promise<{ duplicate: boolean; quota: QuotaCheckResult }>;
   resolveSession(sessionId: string, token: string): Promise<{ session: import("@diy-agent/domain").Session; tenantId: Tenant["id"] } | null>;
+  resolveSessionBootstrap(sessionId: string, token: string, checkQuota?: boolean): Promise<SessionBootstrap | null>;
   createTenant(input: CreateTenantInput): Promise<Tenant>;
   getTenant(id: Tenant["id"]): Promise<Tenant | null>;
   listTenants(): Promise<Tenant[]>;

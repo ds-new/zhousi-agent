@@ -2,18 +2,20 @@ import { createHash } from "node:crypto";
 import type { KnowledgeBaseConfig, TenantId, WorkspaceId } from "@diy-agent/domain";
 import {
   HybridKbService,
+  runSearch,
   InternalKbStore,
   PostgresKbStore,
   ProtocolMcpKbSearchClient,
   type KbDocument,
   type KbSearchResult,
   type KbStore,
+  type KbSearchOptions,
   type McpKbSearchClient,
   type McpConnectionOptions,
 } from "@diy-agent/kb-rag";
 import pg from "pg";
 
-export interface KbRuntimeSearchInput {
+export interface KbRuntimeSearchInput extends KbSearchOptions {
   sessionId?: string;
   workspaceId: WorkspaceId;
   query: string;
@@ -41,7 +43,7 @@ export interface KbRuntimeDeps {
   resolveTenantDatabase?: (tenantId: TenantId) => Promise<{ databaseUrl: string; schema: string } | null>;
   maxDatabasePools?: number;
   /** Must return exactly 128 finite, nonzero vector values, matching the persisted schema. */
-  embeddingProvider?: (text: string, tenantId?: string) => Promise<number[]>;
+  embeddingProvider?: (text: string, tenantId?: string, options?: KbSearchOptions) => Promise<number[]>;
 }
 
 export interface KbRuntime {
@@ -74,7 +76,7 @@ export function createKbRuntime(deps: KbRuntimeDeps = {}): KbRuntime {
   }
 
   async function resolveInternalStore(tenantId?: TenantId): Promise<KbStore> {
-    const embedding = deps.embeddingProvider ? (text: string) => deps.embeddingProvider!(text, tenantId) : undefined;
+    const embedding = deps.embeddingProvider ? (text: string, options?: KbSearchOptions) => deps.embeddingProvider!(text, tenantId, options) : undefined;
     if (deps.internalStore) return deps.internalStore;
     if (deps.resolveTenantDatabase) {
       if (!tenantId) throw new Error("kb_tenant_required");
@@ -101,7 +103,7 @@ export function createKbRuntime(deps: KbRuntimeDeps = {}): KbRuntime {
     };
     return {
       async ingest(input) { const document = await inner.ingest({ ...input, workspaceId: namespace(input.workspaceId) }); return { ...document, workspaceId: input.workspaceId }; },
-      search: (workspaceId, query) => inner.search(namespace(workspaceId), query),
+      search: (workspaceId, query, limit, options) => inner.search(namespace(workspaceId), query, limit, options),
     };
   }
 
@@ -118,7 +120,11 @@ export function createKbRuntime(deps: KbRuntimeDeps = {}): KbRuntime {
   return {
     async search(input) {
       if (typeof input.query !== "string" || !input.query.trim() || input.query.length > 16_384) throw new Error("kb_query_invalid");
-      return (await getService(input.kbConfig, input.tenantId, input.workspaceId, input.sessionId)).search(input.workspaceId, input.query);
+      return runSearch(input, async options => {
+        const service = await getService(input.kbConfig, input.tenantId, input.workspaceId, input.sessionId);
+        options.signal.throwIfAborted();
+        return service.search(input.workspaceId, input.query, options);
+      });
     },
     async ingest(input) {
       if (typeof input.title !== "string" || !input.title.trim() || input.title.length > 1024 || typeof input.content !== "string" || !input.content.trim() || input.content.length > 1_048_576) throw new Error("kb_document_invalid");

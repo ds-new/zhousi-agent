@@ -27,7 +27,35 @@ it('serializes session owners across stores, rolls back state, and atomically in
 });
 
 import { AgentRuntime } from '../src/agent-runtime.js';
+import {WorkspaceMemory} from '../src/workspace-memory.js';
 import pg from 'pg';
+it('multiple replicas can initialize an empty runtime database concurrently',async()=>{
+ const admin=new pg.Pool({connectionString:process.env.DIY_TEST_DATABASE_URL!});
+ const name='runtime_init_'+crypto.randomUUID().replaceAll('-','');const url=new URL(process.env.DIY_TEST_DATABASE_URL!);url.pathname='/'+name;
+ const replicas=Array.from({length:4},()=>new PostgresArtifacts(url.toString()));
+ await admin.query(`CREATE DATABASE "${name}"`);
+ try{await Promise.all(replicas.map(files=>files.init()));await replicas[0]!.write('test',['tenant'],{value:1});assert.deepEqual(await replicas[3]!.read('test',['tenant']),{value:1});}
+ finally{await Promise.all(replicas.map(files=>files.close()));await admin.query(`DROP DATABASE "${name}"`);await admin.end();}
+});
+it('memory hot/cold migration and appended state roll back with the session transaction',async()=>{
+ const files=new PostgresArtifacts(process.env.DIY_TEST_DATABASE_URL!);await files.init();
+ const tenant=crypto.randomUUID();const scope=[tenant,'w'];const now=new Date();
+ const fact={id:'old',workspaceId:'w',kind:'fact' as const,content:'legacy fact',createdAt:now,updatedAt:now};
+ const archive=[{...fact,id:'archive',archivedAt:now,expiresAt:new Date(Date.now()+86400000)}];
+ const legacy={entries:[fact],archive};await files.write('workspace-memory',scope,legacy);
+ try{
+  await assert.rejects(files.withLock([...scope,'s'],async tx=>{
+   await new WorkspaceMemory(tx).append(tenant,'w',{...fact,id:'new',content:'new fact'} as never);
+   await tx.write('outbox',[...scope,'s','r'],{eventId:'event'});throw new Error('rollback');
+  }),/rollback/);
+  assert.deepEqual(await files.read('workspace-memory',scope),legacy);
+  assert.equal(await files.read('workspace-memory-archive',scope),undefined);
+  assert.equal((await files.list('outbox',tenant)).length,0);
+  await files.withLock([...scope,'s'],tx=>new WorkspaceMemory(tx).append(tenant,'w',{...fact,id:'new',content:'new fact'} as never));
+  const restored=new PostgresArtifacts(process.env.DIY_TEST_DATABASE_URL!);
+  try{assert.equal((await restored.read<any>('workspace-memory',scope)).entries.length,2);assert.deepEqual(await restored.read('workspace-memory-archive',scope),archive);}finally{await restored.close();}
+ }finally{await files.close();}
+});
 it('two runtime replicas keep all concurrent workspace turns and replay completed turns without model calls',async()=>{
  const url=process.env.DIY_TEST_DATABASE_URL!;const a=new PostgresArtifacts(url);const b=new PostgresArtifacts(url);await a.init();await b.init();
  const tenant=crypto.randomUUID();let calls=0;

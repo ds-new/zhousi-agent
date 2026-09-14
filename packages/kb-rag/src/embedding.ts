@@ -1,3 +1,4 @@
+import type { KbSearchOptions } from "./types.js";
 export const EMBEDDING_DIMENSIONS = 128;
 
 /** Deterministic local embedding — production replaces with gateway-routed model. */
@@ -29,7 +30,7 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-export type EmbeddingProvider = (text: string) => Promise<number[]>;
+export type EmbeddingProvider = (text: string, options?: KbSearchOptions) => Promise<number[]>;
 
 /** PostgreSQL schema and all retrieval vectors use the same fixed dimension contract. */
 export function validateEmbedding(values: number[]): number[] {

@@ -96,3 +96,13 @@ CI 已配置锁文件安装、全量 TypeScript 测试与构建、类型检查�
 先在预生产环境恢复一份脱敏数据库和 Vault 密钥材料，验证 `/health`、`/ready`、租户越权拒绝、会话恢复、正常对话的 trace 投递及 KB 检索。`/health` 检查进程存活，`/ready` 检查服务是否可接受流量；两者都不代表业务质量验收。对 Evolution 的自动周期先保持 `DIY_EVOLUTION_INTERVAL_MS=0`，待业务任务评估与审批路径通过后再按客户启用。
 
 保留上一版本镜像 digest、版本配置和数据库备份。出现鉴权边界破坏、数据不一致或评估质量下降时先停止自动进化，恢复已批准的 Profile 版本并回退部署镜像。数据库迁移是否向后兼容必须在预生产验证；不要把回退镜像当成数据库恢复策略。备份至少覆盖控制域和每个客户域数据库，并定期演练恢复，核对 Session/Memory/Skill/KB 与令牌路由。上线后的 SLO、监控告警和容量阈值需由实际业务负载测试确定。
+
+## 2026-09-12 存储布局升级
+
+本次 Trace 从租户 checkpoint 分离为 SQL 权威存储，Memory 从混合 head 分离冷归档。先在备份副本验收迁移，再停止自动进化、排空进行中的评估与 turn、停止旧 CP/DP 写入副本，备份平台域和所有客户域后启动新版本。不要混跑新旧存储写入逻辑：旧 CP 可能重新写入已移除的 Trace 副本，旧 DP 不识别新的冷归档位置。
+
+CP 初始化迁移历史 checkpoint Trace，并将 `latency_ms` 从 INTEGER 转为 DOUBLE PRECISION；大表类型变更及索引创建可能持锁，应预留维护窗口。相同 Trace ID 必须字段一致才可去重；出现 `legacy_trace_conflict` 或归属不符时初始化失败并回滚该租户迁移，不静默选择一个副本。保留备份并核对两份证据来源后再由运维解决冲突。各租户逐个迁移，不承诺所有专库跨数据库一次提交。
+
+DP 在追加或维护时把旧 `workspace-memory` 内联归档、`memory` / `memory-archive` 工件迁至 v2 head 与 `workspace-memory-archive`。生产数据库中同一 Workspace 的迁移原子提交；新 head 已存在时，旧副本独有事实进入冷归档，避免复活旧活动记忆。维护使用 keyset 游标分批进行，因此冷 Workspace 的迁移可能跨多个周期。LocalFiles 仅为开发适配器，不提供跨文件事务保证。
+
+验收固定 Session 版本、当前策略、跨 Workspace Memory 隔离、历史 Trace 查询与发布门禁，再恢复接流量。需要回滚时先停新写入，使用已验证的反向迁移或一致备份恢复；直接换回旧镜像不能恢复旧存储合同。

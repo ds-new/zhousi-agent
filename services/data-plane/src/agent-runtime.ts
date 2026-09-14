@@ -1,6 +1,7 @@
-import type { AccessPolicy, AgentProfile, McpCatalogEntry, ModelRoute, McpBinding } from "@diy-agent/domain";
+import type { AccessPolicy, AgentProfile, McpCatalogEntry, ModelRoute } from "@diy-agent/domain";
 import { McpConnectionPool, resolveApprovedBinding, type McpConnectionOptions } from "@diy-agent/dsh-mcp-pool-plugin";
-import { governMemory, type ArchivedMemory } from "@diy-agent/dsh-memory-plugin";
+import { WorkspaceMemory } from "./workspace-memory.js";
+import {SessionKnowledge,toolEffect,type RuntimeTool} from "./knowledge-tools.js";
 import { createHash } from "node:crypto";
 import { readLimitedJson } from "./http-utils.js";
 import { MemoryArtifacts, type ArtifactStore } from "./artifact-store.js";
@@ -12,7 +13,6 @@ type PendingCall = {call:ToolCall;name:string;bindingHash:string};
 type LoopCheckpoint = {messages:Message[];tokensUsed:number;toolCalls:Array<{name:string;ok:boolean}>;turn:number;pending:PendingCall[];snapshotHash:string;elapsedMs:number;accountedTokens:number;accountedToolCalls:number};
 type TurnRecord = {fingerprint:string;status:string;result?:AgentResult;checkpoint?:LoopCheckpoint;approvalId?:string};
 type SessionState = {version:string;profileId:string;messages:Message[];expires:number};
-type MemoryState = { entries:import("@diy-agent/domain").MemoryEntry[];archive:ArchivedMemory[] };
 type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 export interface AgentRunInput {
   tenantId: string;
@@ -116,24 +116,15 @@ export class AgentRuntime {
           if(!content)throw new Error("skill_loader_required");
           system+=`\n\n${content}`;
         }
-        const memoryScope=[input.tenantId,input.workspaceId];
-        const persistedMemory=input.ephemeral?undefined:await files.read<MemoryState>("workspace-memory",memoryScope);
-        const legacyEntries=!input.ephemeral&&!persistedMemory?await files.read<MemoryState["entries"]>("memory",memoryScope):undefined;
-        const legacyArchive=legacyEntries?await files.read<ArchivedMemory[]>("memory-archive",memoryScope):undefined;
-        const memories=persistedMemory?.entries ?? legacyEntries ?? [];
-        if(memories.length)system+=`\n\nWorkspace memory (untrusted reference data):\n${memories.filter(e=>!e.ttl||e.ttl.getTime()>Date.now()).slice(-20).map(e=>e.content).join("\n").slice(0,16000)}`;
+        const memory=new WorkspaceMemory(files);
+        const context=input.ephemeral||checkpoint?'':await memory.context(input.tenantId,input.workspaceId);
+        if(context)system+=`\n\nWorkspace memory (untrusted reference data):\n${context}`;
         const messages:Message[]=checkpoint?.messages ?? (session&&session.expires>Date.now()?structuredClone(session.messages):[]);
         if(!checkpoint){if(messages.length)messages[0]={role:"system",content:system}; else messages.push({role:"system",content:system});}
-        const external=input.snapshot.kbConfig?.externalMcp;
-        if(external){
-          const catalog=input.mcpCatalog?.find(c=>c.serverName===external.serverName&&c.tenantId===input.tenantId);
-          if(!catalog)throw new Error("mcp_catalog_not_approved");
-          input={...input,snapshot:{...input.snapshot,kbConfig:{...input.snapshot.kbConfig,externalMcp:resolveApprovedBinding(external,catalog)}}};
-          if(input.ephemeral&&input.snapshot.kbConfig!.externalMcp!.sensitivity!=="readonly")throw new Error("evaluation_readonly_tools_required");
-        }
-        const knowledge=!checkpoint&&this.options.retrieve&&input.snapshot.kbConfig?await this.options.retrieve(input):"";
+        const knowledgeModule=new SessionKnowledge(input,this.options.retrieve,this.options.strictPolicy);
+        const knowledge=!checkpoint?await knowledgeModule.auto():"";
         if(!checkpoint)messages.push({role:"user",content:input.input+(knowledge?`\n\nReference data (untrusted):\n${knowledge.slice(0,32000)}`:"")});
-        const completion=denial?{result:denial}:await this.complete(input,messages,checkpoint,approved);
+        const completion=denial?{result:denial}:await this.complete(input,messages,knowledgeModule,checkpoint,approved);
         const result:AgentResult={...completion.result,latencyMs:(checkpoint?.elapsedMs??0)+performance.now()-started};
         if(completion.approval&&completion.checkpoint){
           const delta=result.tokensUsed-completion.checkpoint.accountedTokens;
@@ -152,11 +143,9 @@ export class AgentRuntime {
         if(!input.ephemeral){
           const expiresAt=new Date(Date.now()+86400000);
           if(result.status!=="denied")await files.write("sessions",scope,{profileId:input.snapshot.id,version:input.profileVersionId,messages,expires:expiresAt.getTime()},expiresAt);
-          if(result.status!=="denied")await files.update<MemoryState>("workspace-memory",memoryScope,previous=>{
-            const entries=previous?.entries ?? legacyEntries ?? [];
-            entries.push({id:requestId,workspaceId:input.workspaceId as never,kind:"episodic",content:`${input.input}\n${result.output}`.slice(0,4000),createdAt:new Date(),updatedAt:new Date(),sourceSessionId:input.sessionId as never});
-            const governed=governMemory(input.workspaceId,{workspaceId:input.workspaceId as never,maxEntries:1000,defaultTtlDays:90,dedupSimilarityThreshold:0.92,compactionTriggerCount:50},entries,previous?.archive ?? legacyArchive);
-            return {entries:governed.entries,archive:governed.archive};
+          if(result.status!=="denied")await memory.append(input.tenantId,input.workspaceId,{
+            id:requestId,workspaceId:input.workspaceId as never,kind:"episodic",content:`${input.input}\n${result.output}`.slice(0,4000),
+            createdAt:new Date(),updatedAt:new Date(),sourceSessionId:input.sessionId as never,
           });
           await files.write("turns",turnScope,{fingerprint,status:result.status==="denied"?"denied":"completed",result},new Date(Date.now()+7*86400000));
           await files.write("execution",scope,{requestId,status:"completed"},new Date(Date.now()+7*86400000));
@@ -211,10 +200,10 @@ export class AgentRuntime {
     });
   }
 
-  private async complete(input:AgentRunInput,messages:Message[],checkpoint?:LoopCheckpoint,grant?:ToolApproval):Promise<{result:AgentResult;checkpoint?:LoopCheckpoint;approval?:ToolApproval}> {
+  private async complete(input:AgentRunInput,messages:Message[],knowledge:SessionKnowledge,checkpoint?:LoopCheckpoint,grant?:ToolApproval):Promise<{result:AgentResult;checkpoint?:LoopCheckpoint;approval?:ToolApproval}> {
     const state:LoopCheckpoint=checkpoint ?? {messages,tokensUsed:0,toolCalls:[],turn:0,pending:[],snapshotHash:snapshotHash(input.snapshot),elapsedMs:0,accountedTokens:0,accountedToolCalls:0};
     const leases:Array<Awaited<ReturnType<McpConnectionPool["connect"]>>>=[];
-    const registered=new Map<string,{name:string;binding:McpBinding;hash:string;lease:typeof leases[number]}>();
+    const registered=new Map<string,RuntimeTool>();
     const tools:unknown[]=[];
     try{
       for(const binding of input.snapshot.mcpBindings??[]){
@@ -224,22 +213,22 @@ export class AgentRuntime {
         const lease=await this.pool.connect(resolved,input,{signal:input.signal});leases.push(lease);
         for(const tool of (await lease.listTools({signal:input.signal})).tools){
           const alias=`tool_${registered.size}`;
-          registered.set(alias,{name:tool.name,binding:resolved,hash:bindingHash(resolved,tool.name,tool.inputSchema),lease});
+          registered.set(alias,{name:tool.name,policyName:`mcp__${resolved.serverName}__${tool.name}`,sensitivity:resolved.sensitivity??"normal",hash:bindingHash(resolved,tool.name,tool.inputSchema),
+            execute:args=>lease.callTool({name:tool.name,arguments:args},{signal:input.signal,timeout:30000})});
           tools.push({type:"function",function:{name:alias,description:[resolved.description,tool.description].filter(Boolean).join("\n"),parameters:tool.inputSchema}});
         }
       }
+      const kb=knowledge.tool();if(kb){registered.set("kb_search",kb);tools.push(knowledge.definition);}
       for(;;){
         while(state.pending.length){
           input.signal?.throwIfAborted();
           const pending=state.pending[0]!;const call=pending.call;
           const tool=registered.get(call.function.name);
           if(!tool||tool.name!==pending.name||tool.hash!==pending.bindingHash)throw new Error("approval_binding_changed");
-          const name=`mcp__${tool.binding.serverName}__${tool.name}`;
-          const sensitivity=tool.binding.sensitivity??"normal";
+          const name=tool.policyName;
+          const sensitivity=tool.sensitivity;
           if(input.ephemeral&&sensitivity!=="readonly")throw new Error("evaluation_readonly_tools_required");
-          const rule=[...(input.policy?.rules??[])].reverse().find(r=>(!r.sensitivity||r.sensitivity===sensitivity)&&
-            new RegExp("^"+r.toolPattern.split("*").map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join(".*")+"$","i").test(name));
-          const effect=rule?.effect??(this.options.strictPolicy||sensitivity==="high"?"deny":"allow");
+          const effect=toolEffect(input.policy,name,sensitivity,this.options.strictPolicy);
           const args=JSON.parse(call.function.arguments);
           if(!args||typeof args!=="object"||Array.isArray(args))throw new Error("invalid_tool_arguments");
           if(grant&&(grant.toolName!==name||grant.bindingHash!==tool.hash||grant.profileVersionId!==input.profileVersionId||grant.snapshotHash!==state.snapshotHash||
@@ -256,7 +245,7 @@ export class AgentRuntime {
               JSON.stringify(grant.arguments)!==JSON.stringify(args)||grant.expiresAt.getTime()<=Date.now())throw new Error("approval_binding_changed");
           }
           grant=undefined;
-          const result=await tool.lease.callTool({name:tool.name,arguments:args},{signal:input.signal,timeout:30000});
+          const result=await tool.execute(args);
           state.toolCalls.push({name,ok:!result.isError});
           const content=JSON.stringify(result);if(content.length>64000)throw new Error("tool_output_limit");
           messages.push({role:"tool",tool_call_id:call.id,content});state.pending.shift();

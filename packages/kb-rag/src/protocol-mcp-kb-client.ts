@@ -1,7 +1,8 @@
 import { McpConnectionPool, type McpConnectionOptions } from "@diy-agent/dsh-mcp-pool-plugin";
+import { runSearch } from "./search-operation.js";
 import type { McpBinding } from "@diy-agent/domain";
 import type { McpKbSearchClient, McpKbSearchContext } from "./external-mcp-kb-connector.js";
-import type { KbSearchHit } from "./types.js";
+import type { KbSearchHit, KbSearchOptions } from "./types.js";
 
 /** An injected pool belongs to its caller; otherwise this client owns and closes its pool. */
 export class ProtocolMcpKbSearchClient implements McpKbSearchClient {
@@ -9,13 +10,17 @@ export class ProtocolMcpKbSearchClient implements McpKbSearchClient {
   private closed = false;
   constructor(private pool?: McpConnectionPool, private options: McpConnectionOptions = {}) {}
 
-  async search(binding: McpBinding, query: string, context: McpKbSearchContext): Promise<KbSearchHit[]> {
+  async search(binding: McpBinding, query: string, context: McpKbSearchContext, options: KbSearchOptions = {}): Promise<KbSearchHit[]> {
+    return runSearch(options, scoped => this.execute(binding, query, context, scoped));
+  }
+
+  private async execute(binding: McpBinding, query: string, context: McpKbSearchContext, options: KbSearchOptions): Promise<KbSearchHit[]> {
     if (this.closed) throw new Error("mcp_kb_client_closed");
     if (typeof query !== "string" || !query.trim() || query.length > 16_384) throw new Error("mcp_kb_query_invalid");
     const pool = this.pool ?? (this.ownedPool ??= new McpConnectionPool(this.options));
-    const lease = await pool.connect(binding, context);
+    const lease = await pool.connect(binding, context, { signal: options.signal });
     try {
-      const result = await lease.callTool({ name: binding.searchTool ?? "search", arguments: { query } });
+      const result = await lease.callTool({ name: binding.searchTool ?? "search", arguments: { query } }, { signal: options.signal, timeout: options.timeoutMs });
       if (result.isError) throw new Error("mcp_kb_search_failed");
       let payload: unknown = result.structuredContent;
       if (!payload && Array.isArray(result.content)) {

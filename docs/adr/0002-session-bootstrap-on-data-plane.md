@@ -37,7 +37,11 @@ Knowledge Base config (ADR-0001) already moved to Data Plane but used a separate
 - **Single merged CP bootstrap endpoint**: rejected for Phase 1 — two existing endpoints sufficient.
 - **Embed policy in snapshot**: rejected — duplicates workspace policy source of truth (Phase 4 profile eval already returns policy separately).
 
-## Related
+## 2026-09-12 implementation clarification
+
+The native Node runtime uses `POST /sessions/resolve`, now backed by a single `resolveSessionBootstrap` store operation. It validates the session token and optionally consumes RPM before returning the pinned snapshot, bound skill hashes, current policy and MCP catalog. This optimization is request-scoped, with no cross-turn cache. Native turns retain their existing current-policy refresh behavior. Decision 10 above describes the DSH plugin bootstrap path; this change does not replace its cache or silently unify these two policy lifecycles.
+
+## Related documents
 
 - ADR-0001: Knowledge Base runtime on Data Plane
 - Spec: `docs/specs/session-bootstrap-data-plane.md`

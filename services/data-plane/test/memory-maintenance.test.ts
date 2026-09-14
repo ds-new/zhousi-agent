@@ -7,6 +7,7 @@ it('retires expired memory without a user turn, preserves unexpired facts, and n
  const expired={...active,id:'expired',content:'Old',ttl:new Date(Date.now()-1000)};
  await files.write('workspace-memory',['a','w'],{entries:[active,expired],archive:[]});await files.write('workspace-memory',['b','w'],{entries:[expired],archive:[]});
  assert.equal(await maintainMemory(files,'a'),1);
- const result=await files.read<any>('workspace-memory',['a','w']);assert.deepEqual(result.entries.map((e:any)=>e.id),['active']);assert.equal(result.archive[0].id,'expired');
+ const result=await files.read<any>('workspace-memory',['a','w']);assert.deepEqual(result.entries.map((e:any)=>e.id),['active']);
+ assert.equal((await files.read<any[]>('workspace-memory-archive',['a','w']))![0].id,'expired');
  assert.equal((await files.read<any>('workspace-memory',['b','w'])).entries.length,1);
 });

@@ -18,9 +18,8 @@ export async function authorizeRoute(req: IncomingMessage, res: ServerResponse, 
   };
   if (path === "/health" || path === "/ready" || (method === "GET" && /^\/marketplace\/skills(?:\/[^/]+)?$/.test(path))) return true;
   if (path === "/sessions/resolve" && method === "POST") {
-    const body = await readBody(req);
-    const resolved = await store.resolveSession(String(body.sessionId ?? ""), req.headers.authorization?.replace(/^Bearer /, "") ?? "");
-    return Boolean(resolved) || deny(401, "invalid_session_token");
+    // This handler authenticates and materializes the Session atomically in one store operation.
+    return true;
   }
   const platformRoute = (path === "/tenants" || path === "/marketplace/skills") && method === "POST";
   if (platformRoute) {

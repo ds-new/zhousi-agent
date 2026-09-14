@@ -10,12 +10,23 @@ export class PostgresArtifacts extends SkillArtifacts implements ArtifactStore {
     if (!pool) this.pool.on('error', () => console.error('runtime_database_connection_error'));
   }
   async init() {
-    await this.pool.query(`CREATE SCHEMA IF NOT EXISTS diy_runtime;
-      CREATE TABLE IF NOT EXISTS diy_runtime.artifacts (
-        tenant_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
-        scope JSONB NOT NULL, payload JSONB NOT NULL, expires_at TIMESTAMPTZ,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, kind, key));
-      CREATE INDEX IF NOT EXISTS artifacts_expiry ON diy_runtime.artifacts(expires_at) WHERE expires_at IS NOT NULL`);
+    const client = await this.pool.connect();
+    let broken = false;
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('diy_runtime_schema', 0))");
+      await client.query(`CREATE SCHEMA IF NOT EXISTS diy_runtime;
+        CREATE TABLE IF NOT EXISTS diy_runtime.artifacts (
+          tenant_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
+          scope JSONB NOT NULL, payload JSONB NOT NULL, expires_at TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, kind, key));
+        CREATE INDEX IF NOT EXISTS artifacts_expiry ON diy_runtime.artifacts(expires_at) WHERE expires_at IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS artifacts_delivery ON diy_runtime.artifacts(tenant_id,kind,updated_at)`);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => { broken = true; });
+      throw error;
+    } finally { client.release(broken); }
   }
   private query(text: string, values?: unknown[]) { return (this.client ?? this.pool).query(text, values); }
   async read<T>(kind: string, scope: string[]): Promise<T | undefined> {
@@ -33,11 +44,19 @@ export class PostgresArtifacts extends SkillArtifacts implements ArtifactStore {
     await this.query('DELETE FROM diy_runtime.artifacts WHERE tenant_id=$1 AND kind=$2 AND key=$3', [scope[0], kind, artifactKey(kind, scope)]);
   }
   async update<T>(kind: string, scope: string[], change: (value: T | undefined) => T): Promise<T> {
-    if (!this.client) return this.withLock(['update', ...scope, kind], tx => tx.update(kind, scope, change));
-    await this.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [artifactKey(kind, scope)]);
-    const value = change(await this.read<T>(kind, scope));
-    await this.write(kind, scope, value);
-    return value;
+    return this.withRecordLock(kind,scope,async tx=>{
+      const value=change(await tx.read<T>(kind,scope));await tx.write(kind,scope,value);return value;
+    });
+  }
+  async withRecordLock<T>(kind:string,scope:string[],operation:(store:ArtifactStore)=>Promise<T>):Promise<T>{
+    if(!this.client)return this.withLock(['record',kind,...scope],tx=>tx.withRecordLock(kind,scope,operation));
+    await this.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',[artifactKey(kind,scope)]);
+    return operation(this);
+  }
+  async scan(kind:string,tenantId:string,after='',limit=20){
+    artifactKey(kind,[tenantId]);
+    const result=await this.query('SELECT key,scope FROM diy_runtime.artifacts WHERE tenant_id=$1 AND kind=$2 AND key>$3 AND (expires_at IS NULL OR expires_at>now()) ORDER BY key LIMIT $4',[tenantId,kind,after,Math.max(1,Math.min(limit,1000))]);
+    return result.rows.map(row=>({key:row.key as string,scope:row.scope as string[]}));
   }
   async withLock<T>(scope: string[], operation: (store: ArtifactStore) => Promise<T>): Promise<T> {
     if (this.client) throw new Error('nested_runtime_transaction');

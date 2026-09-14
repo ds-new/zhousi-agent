@@ -22,7 +22,13 @@ export interface KbSearchResult {
   hits: KbSearchHit[];
 }
 
+export interface KbSearchOptions {
+  signal?: AbortSignal;
+  /** Total retrieval budget, including embedding and MCP connection startup. Defaults to 30s. */
+  timeoutMs?: number;
+}
+
 export interface KbStore {
   ingest(doc: Omit<KbDocument, "id" | "createdAt">): Promise<KbDocument>;
-  search(workspaceId: WorkspaceId, query: string, limit?: number): Promise<KbSearchHit[]>;
+  search(workspaceId: WorkspaceId, query: string, limit?: number, options?: KbSearchOptions): Promise<KbSearchHit[]>;
 }

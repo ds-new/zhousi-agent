@@ -1,7 +1,7 @@
 import { ProtocolMcpKbSearchClient } from "./protocol-mcp-kb-client.js";
 import { acquire, release } from "@diy-agent/dsh-mcp-pool-plugin";
 import type { McpBinding } from "@diy-agent/domain";
-import type { KbSearchHit } from "./types.js";
+import type { KbSearchHit, KbSearchOptions } from "./types.js";
 
 export interface McpKbSearchContext {
   tenantId?: string;
@@ -15,12 +15,13 @@ export interface McpKbSearchClient {
     binding: McpBinding,
     query: string,
     ctx: McpKbSearchContext,
+    options?: KbSearchOptions,
   ): Promise<KbSearchHit[]>;
 }
 
 type FetchLike = (
   input: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
 ) => Promise<Response>;
 
 export class HttpMcpKbSearchClient implements McpKbSearchClient {
@@ -30,7 +31,9 @@ export class HttpMcpKbSearchClient implements McpKbSearchClient {
     binding: McpBinding,
     query: string,
     ctx: McpKbSearchContext,
+    options: KbSearchOptions = {},
   ): Promise<KbSearchHit[]> {
+    options.signal?.throwIfAborted();
     if (!binding.url) {
       throw new Error("external_mcp_url_required");
     }
@@ -41,6 +44,7 @@ export class HttpMcpKbSearchClient implements McpKbSearchClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),
+        signal: options.signal,
       });
       if (!res.ok) {
         throw new Error(`external_mcp_search_${res.status}`);
@@ -72,7 +76,7 @@ export class ExternalMcpKbConnector {
 
   async close(): Promise<void> { if (this.ownsClient) await this.client.close?.(); }
 
-  async search(query: string): Promise<KbSearchHit[]> {
-    return this.client.search(this.binding, query, this.ctx);
+  async search(query: string, options: KbSearchOptions = {}): Promise<KbSearchHit[]> {
+    return this.client.search(this.binding, query, this.ctx, options);
   }
 }
