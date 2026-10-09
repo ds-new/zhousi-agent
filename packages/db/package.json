@@ -14,7 +14,7 @@
     "@diy-agent/domain": "*"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^26.6.4",
     "@types/pg": "^8.11.10",
     "typescript": "^5.7.2"
   },
