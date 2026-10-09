@@ -13,7 +13,7 @@
     "@diy-agent/domain": "*",
     "@diy-agent/dsh-bootstrap-plugin": "*",
     "@diy-agent/kb-rag": "*",
-    "pg": "^8.13.1"
+    "pg": "^8.23.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*"
